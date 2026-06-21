@@ -374,6 +374,16 @@ footer {
         <div class="ctrl-val" id="cv-vol">75<small>%</small></div>
         <input type="range" class="sl" id="sl-vol" min="0" max="100" value="75">
       </div>
+      <div class="ctrl-card">
+        <div class="ctrl-card-name">Mic Gain<em>boost quiet sounds</em></div>
+        <div class="ctrl-val" id="cv-micgain">0<small>dB</small></div>
+        <input type="range" class="sl" id="sl-micgain" min="0" max="36" value="0">
+      </div>
+      <div class="ctrl-card">
+        <div class="ctrl-card-name">Noise Floor<em>gate out static/hiss</em></div>
+        <div class="ctrl-val" id="cv-noisefloor">15<small>%</small></div>
+        <input type="range" class="sl" id="sl-noisefloor" min="0" max="100" value="15">
+      </div>
     </div>
 
     <!-- EVENT LOG -->
@@ -564,12 +574,14 @@ const FW = (function(){
   let noteVelocityHistory = [];
 
   // Audio nodes (Web Audio API native + Tone.js)
-  let micSrc, hpFilter, analyserNode, analyserBuf;
+  let micSrc, micGainNode, hpFilter, analyserNode, analyserBuf;
   let dryGain, masterGain;
   let reverbNode; // Tone.js Reverb
   let reverbInputGain, reverbOutputGain;
   let padGain; // overall ambient pad gain
   let toneDestination;
+
+  function dbToGain(db) { return Math.pow(10, db / 20); }
 
   // ── THE INSTRUMENT ──────────────────────────────────────────
   // No synths. Every "note" played by the piece is a real chunk of audio
@@ -603,7 +615,16 @@ const FW = (function(){
     dry: 0.50,
     hpFreq: 180,
     vol: 0.75,
+    micGainDb: 0,     // 0..36dB boost applied to the raw mic signal
+    noiseFloor: 0.15, // 0..1 → maps to an RMS gate threshold, see noiseFloorToRms()
   };
+
+  // 0..1 slider position → an actual RMS threshold for the noise gate.
+  // Mapped with a curve so the low end of the slider gives fine control
+  // over quiet hiss/static without needing huge slider travel.
+  function noiseFloorToRms(v) {
+    return Math.pow(v, 2) * 0.06;
+  }
 
   // Visualiser
   let wfCanvas, wfCtx, orbitCanvas, orbitCtx;
@@ -717,12 +738,19 @@ registerProcessor('transient-processor', TransientProcessor);
     micStream = stream;
     micSrc = nativeCtx.createMediaStreamSource(stream);
 
+    // 0. MIC GAIN — boosts the raw signal before anything else touches it,
+    // so quiet/distant sounds become audible *and* detectable as transients
+    // (the gate and pitch detection both see the boosted signal too).
+    micGainNode = nativeCtx.createGain();
+    micGainNode.gain.value = dbToGain(P.micGainDb);
+    micSrc.connect(micGainNode);
+
     // 1. HIGH-PASS FILTER — cuts wind / traffic rumble
     hpFilter = nativeCtx.createBiquadFilter();
     hpFilter.type = 'highpass';
     hpFilter.frequency.value = P.hpFreq;
     hpFilter.Q.value = 0.8;
-    micSrc.connect(hpFilter);
+    micGainNode.connect(hpFilter);
 
     // 2. ANALYSER — for waveform + transient detection
     analyserNode = nativeCtx.createAnalyser();
@@ -815,6 +843,17 @@ registerProcessor('transient-processor', TransientProcessor);
 
     // Mirror the smoothed value sent from the worklet
     rmsSmooth = data.rmsSmooth;
+
+    // NOISE GATE — anything below this RMS floor is treated as silence:
+    // never recorded into the sample bank, never triggers a transient. This
+    // is what keeps hiss/static/room rumble from becoming part of the music.
+    const noiseGate = noiseFloorToRms(P.noiseFloor);
+    if (rms < noiseGate) {
+      orbitEnergy *= 0.92;
+      orbitHistory.copyWithin(0, 1);
+      orbitHistory[orbitHistory.length - 1] = 0;
+      return;
+    }
 
     // Transient detection: sudden spike above smoothed floor + absolute floor
     const thresh = 0.005 + (1 - P.transientThresh) * 0.08;
@@ -919,16 +958,28 @@ registerProcessor('transient-processor', TransientProcessor);
     return sampleRate / bestT;
   }
 
-  // ── THE INSTRUMENT: SAMPLE BANK + PITCHED GRAIN PLAYBACK ───────
+  // ── THE INSTRUMENT: SAMPLE BANK + PITCHED, SUSTAINED GRAIN PLAYBACK ─────
   // Captured chunks are stored as real AudioBuffers along with whatever
   // pitch (if any) autocorrelation found in them. To "play a note", we pick
-  // a recorded grain and change its playback rate so its own pitch lands on
-  // the target scale frequency — a sample-based instrument built entirely
-  // out of the environment, never an oscillator.
+  // a recorded grain, change its playback rate so its own pitch lands on the
+  // target scale frequency, AND loop it for as long as the note needs to
+  // last — a sample-based instrument that can hold a real musical note,
+  // built entirely out of the environment, never an oscillator.
   function addToBank(chunk, sr, detectedFreq) {
     if (!nativeCtx) return;
     const buf = nativeCtx.createBuffer(1, chunk.length, sr);
-    buf.copyToChannel(chunk, 0);
+    const data = buf.getChannelData(0);
+    // Short fade in/out on the stored grain itself (not just the playback
+    // envelope) so that when it's looped to sustain a note, the loop seam
+    // doesn't click — this is what lets a tiny captured sound become a
+    // smooth held tone instead of a stuttering blip.
+    const fadeLen = Math.max(8, Math.min(Math.floor(sr * 0.005), Math.floor(chunk.length / 4)));
+    for (let i = 0; i < chunk.length; i++) {
+      let g = 1;
+      if (i < fadeLen) g = i / fadeLen;
+      else if (i > chunk.length - fadeLen) g = (chunk.length - i) / fadeLen;
+      data[i] = chunk[i] * g;
+    }
     const pitched = !!(detectedFreq && detectedFreq > 50 && detectedFreq < 2000);
     sampleBank.push({
       buffer: buf,
@@ -950,8 +1001,12 @@ registerProcessor('transient-processor', TransientProcessor);
     return sampleBank[Math.floor(Math.random() * sampleBank.length)];
   }
 
-  function playGrainAtFreq(targetFreq, when, velocity, noteName) {
-    const grain = pickGrain();
+  // durSeconds is the actual musical note length (e.g. an eighth note at the
+  // current tempo) — independent of how long the original recorded grain
+  // was. If the grain is shorter than the note needs to be, it's looped to
+  // sustain; this is the "adjust pitch AND length" part of the instrument.
+  function playGrainAtFreq(targetFreq, when, velocity, durSeconds, noteName, forcedGrain) {
+    const grain = forcedGrain || pickGrain();
     if (!grain || !nativeCtx || !noteOutGain) return false;
 
     let rate = targetFreq / grain.baseFreq;
@@ -959,25 +1014,34 @@ registerProcessor('transient-processor', TransientProcessor);
     // sound (no chipmunk/demon artifacts) even when reaching for a far note
     rate = Math.max(0.5, Math.min(2.4, rate));
 
+    const grainPlayDur = grain.buffer.duration / rate;
+    const dur = Math.max(0.12, durSeconds || grainPlayDur);
+
     const src = nativeCtx.createBufferSource();
     src.buffer = grain.buffer;
     src.playbackRate.value = rate;
+    if (dur > grainPlayDur * 1.15) {
+      // Note needs to last longer than one pass of the grain — loop it
+      src.loop = true;
+      src.loopStart = 0;
+      src.loopEnd = grain.buffer.duration;
+    }
 
     const env = nativeCtx.createGain();
-    const grainDur = grain.buffer.duration / rate;
-    const atk = 0.006;
-    const sustain = Math.min(0.12, grainDur * 0.3);
-    const rel = Math.max(0.08, grainDur - atk - sustain);
-    const vel = Math.max(0, Math.min(1, velocity));
+    const vel = Math.max(0.03, Math.min(1, velocity));
+    const atk = Math.min(0.05, dur * 0.18);
+    const rel = Math.min(0.35, dur * 0.4);
+    const sustainEnd = when + Math.max(atk, dur - rel);
 
     env.gain.setValueAtTime(0, when);
     env.gain.linearRampToValueAtTime(vel, when + atk);
-    env.gain.setTargetAtTime(0.0001, when + atk + sustain, rel * 0.4);
+    env.gain.setValueAtTime(vel, sustainEnd);
+    env.gain.exponentialRampToValueAtTime(0.0008, when + dur + rel);
 
     src.connect(env);
     env.connect(noteOutGain);
     src.start(when);
-    src.stop(when + atk + sustain + rel + 0.2);
+    src.stop(when + dur + rel + 0.05);
 
     lastNoteTime = performance.now();
     highlightNote(targetFreq, vel, noteName || freqToNoteName(targetFreq));
@@ -1001,8 +1065,14 @@ registerProcessor('transient-processor', TransientProcessor);
   // wherever a transient happened to fire. Plays a short composed phrase
   // (see generatePhrase / PHRASE_BANK), repeats it a couple of times, then
   // draws a new variation — theme-and-variation, the basic shape of melody
-  // writing. Live input energy still shapes density/register/loudness, so
-  // the piece keeps listening to the room even while it's "composing".
+  // writing. Crucially, the SAME recorded grain (a "lead voice") is reused
+  // for every note of a phrase, the way a real instrument plays a tune —
+  // instead of a different texture firing on every note. Live input energy
+  // still shapes density/register/loudness, so the piece keeps listening to
+  // the room even while it's "composing".
+  let leadGrain = null;
+  let answerGrain = null;
+
   function startMelodyEngine() {
     if (melodyLoop) return;
     melodyLoop = new Tone.Loop((time) => {
@@ -1014,6 +1084,11 @@ registerProcessor('transient-processor', TransientProcessor);
         currentMotif = generatePhrase(state);
         motifIdx = 0;
         motifRepeatCount = 0;
+        // Pick the "instrument" for this phrase — reusing one recorded grain
+        // across an entire phrase is what makes it read as a tune played on
+        // one voice, rather than a different sound on every single note.
+        leadGrain = pickGrain();
+        answerGrain = state === 'chorus' ? pickGrain() : null;
         if (!currentMotif.length) return;
       }
 
@@ -1030,10 +1105,18 @@ registerProcessor('transient-processor', TransientProcessor);
       const loudRoom = orbitEnergy > 0.05;
       const oct = stepDef.octave + (loudRoom ? 1 : 0);
       const freq = degreeFreq(oct, stepDef.degree);
-      const baseVel = state === 'chorus' ? 0.55 : state === 'outro' ? 0.4 : 0.42;
+      const baseVel = state === 'chorus' ? 0.62 : state === 'outro' ? 0.45 : 0.5;
       const vel = Math.min(0.95, baseVel + Math.min(0.3, orbitEnergy * 4));
 
-      playGrainAtFreq(freq, time, vel);
+      // Notes get the actual grid-length of one step (eighth/quarter/half
+      // note at the current tempo) so the engine genuinely holds a pitch for
+      // a musical duration, not however long the field recording happened to be.
+      const noteDur = Tone.Time(subdivisionForState(state)).toSeconds() * 0.92;
+
+      // Occasional call-and-response in chorus: answer the lead voice with a
+      // second recorded grain instead of one flat, unchanging texture
+      const grain = (answerGrain && Math.random() < 0.3) ? answerGrain : leadGrain;
+      playGrainAtFreq(freq, time, vel, noteDur, null, grain);
     }, subdivisionForState(getCurrentState()));
     melodyLoop.start(0);
   }
@@ -1042,6 +1125,7 @@ registerProcessor('transient-processor', TransientProcessor);
     if (melodyLoop) { melodyLoop.stop(); melodyLoop.dispose(); melodyLoop = null; }
     if (flutterLoop) { flutterLoop.stop(); flutterLoop.dispose(); flutterLoop = null; }
     currentMotif = []; motifIdx = 0; motifRepeatCount = 0;
+    leadGrain = null; answerGrain = null;
   }
 
   // ── SONG STATE MACHINE ────────────────────────────────────────
@@ -1261,14 +1345,14 @@ registerProcessor('transient-processor', TransientProcessor);
   function bindSlider(id, key, cb) {
     $(id).addEventListener('input', function() {
       const v = parseFloat(this.value);
-      P[key] = v / (key === 'hpFreq' ? 1 : 100);
+      P[key] = v / ((key === 'hpFreq' || key === 'micGainDb') ? 1 : 100);
       if (cb) cb(P[key]);
       updateSliderLabel(key, v);
     });
   }
 
   function updateSliderLabel(key, raw) {
-    const map = { reverbMix: ['cv-reverb', '%'], transientThresh: ['cv-trans', '%'], scaleVol: ['cv-scale', '%'], dry: ['cv-dry', '%'], hpFreq: ['cv-hp', 'Hz'], vol: ['cv-vol', '%'] };
+    const map = { reverbMix: ['cv-reverb', '%'], transientThresh: ['cv-trans', '%'], scaleVol: ['cv-scale', '%'], dry: ['cv-dry', '%'], hpFreq: ['cv-hp', 'Hz'], vol: ['cv-vol', '%'], micGainDb: ['cv-micgain', 'dB'], noiseFloor: ['cv-noisefloor', '%'] };
     const [elId, unit] = map[key] || [];
     if (elId) {
       $(elId).innerHTML = Math.round(raw) + `<small>${unit}</small>`;
@@ -1292,6 +1376,10 @@ registerProcessor('transient-processor', TransientProcessor);
     bindSlider('sl-vol', 'vol', v => {
       if (masterGain) masterGain.gain.setTargetAtTime(v, nativeCtx.currentTime, .05);
     });
+    bindSlider('sl-micgain', 'micGainDb', v => {
+      if (micGainNode) micGainNode.gain.setTargetAtTime(dbToGain(v), nativeCtx.currentTime, .08);
+    });
+    bindSlider('sl-noisefloor', 'noiseFloor');
   }
 
   // ── PERFORMANCE ACTIONS ───────────────────────────────────────
@@ -1312,7 +1400,7 @@ registerProcessor('transient-processor', TransientProcessor);
     if (state === 'intro' || state === 'outro') { log('MELODY ENGINE INACTIVE IN ' + state.toUpperCase()); return; }
     if (!sampleBank.length) { log('NOTHING RECORDED YET — let it listen a moment'); return; }
     const idx = Math.floor(Math.random() * SCALE_FREQS.length);
-    playGrainAtFreq(SCALE_FREQS[idx], nativeCtx.currentTime + 0.01, 0.55 + Math.random() * 0.2);
+    playGrainAtFreq(SCALE_FREQS[idx], nativeCtx.currentTime + 0.01, 0.55 + Math.random() * 0.2, 0.55);
     log('MANUAL NOTE → ' + freqToNoteName(SCALE_FREQS[idx]) + ' (from recorded grain)');
     orbitPulse = 0.8;
   }
@@ -1325,13 +1413,19 @@ registerProcessor('transient-processor', TransientProcessor);
       // An extra fast, lightly-melodic cascade layered over the main motif —
       // still drawn from recorded grains, still landing on scale degrees,
       // just denser. Walks the scale rather than jumping randomly, so it
-      // still reads as a run rather than noise.
+      // reads as a run rather than noise, and reuses one recorded grain
+      // (refreshed every so often) so the run sounds like one voice too.
       let walkIdx = Math.floor(SCALE_FREQS.length / 2);
+      let flutterGrain = pickGrain();
+      let stepCount = 0;
       flutterLoop = new Tone.Loop((time) => {
         if (!sampleBank.length) return;
+        stepCount++;
+        if (stepCount % 6 === 0) flutterGrain = pickGrain();
         walkIdx += (Math.random() < 0.5 ? 1 : -1) * (Math.random() < 0.2 ? 2 : 1);
         walkIdx = Math.max(0, Math.min(SCALE_FREQS.length - 1, walkIdx));
-        playGrainAtFreq(SCALE_FREQS[walkIdx], time, 0.3);
+        const dur = Tone.Time('16n').toSeconds() * 0.85;
+        playGrainAtFreq(SCALE_FREQS[walkIdx], time, 0.4, dur, null, flutterGrain);
       }, '16n').start(0);
       log('FLUTTER ON — fast melodic run, still drawn from recorded sound');
     } else {
@@ -1415,7 +1509,7 @@ registerProcessor('transient-processor', TransientProcessor);
     try { micStream?.getTracks().forEach(t => t.stop()); } catch(e) {}
     try { nativeCtx?.close(); } catch(e) {}
     sampleBank = [];
-    ctx = null; nativeCtx = null; micStream = null; noteOutGain = null; convolverNode = null;
+    ctx = null; nativeCtx = null; micStream = null; noteOutGain = null; convolverNode = null; micGainNode = null;
   }
 
   return { start, stop, toggleFreeze, manualNote, toggleFlutter, skipState };
