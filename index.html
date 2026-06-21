@@ -483,12 +483,12 @@ function freqToNoteName(freq) {
 
 // ── SONG STATES ──────────────────────────────────────────────────
 const SONG_STATES = [
-  { name: 'intro',  start: 0,   end: 30,  label: 'INTRO'  },
-  { name: 'verse',  start: 30,  end: 70,  label: 'VERSE'  },
-  { name: 'chorus', start: 70,  end: 140, label: 'CHORUS' },
-  { name: 'outro',  start: 140, end: 180, label: 'OUTRO'  },
+  { name: 'intro',  start: 0,  end: 8,   label: 'INTRO'  },
+  { name: 'verse',  start: 8,  end: 50,  label: 'VERSE'  },
+  { name: 'chorus', start: 50, end: 100, label: 'CHORUS' },
+  { name: 'outro',  start: 100,end: 120, label: 'OUTRO'  },
 ];
-const TOTAL_DUR = 180; // seconds
+const TOTAL_DUR = 120; // seconds
 
 // ── MOTIF / PHRASE GENERATOR ────────────────────────────────────
 // Instead of triggering a random note on every loud sound (a "jumble"), the
@@ -593,11 +593,7 @@ const FW = (function(){
   let noteOutGain;                // gain stage for all melodic grain playback
 
   // Melody engine (Tone.Transport-driven, so notes land on a steady musical grid)
-  let melodyLoop = null;
   let flutterLoop = null;
-  let currentMotif = [];
-  let motifIdx = 0;
-  let motifRepeatCount = 0;
 
   // Transient capture — short buffer playback
   let captureNode;
@@ -1043,59 +1039,90 @@ const FW = (function(){
   let leadGrain = null;
   let answerGrain = null;
 
-  function startMelodyEngine() {
-    if (melodyLoop) return;
-    melodyLoop = new Tone.Loop((time) => {
-      const state = getCurrentState();
-      if (state === 'intro') return; // organic notes only — see onTransientDetected
-      if (!sampleBank.length) return; // nothing recorded yet — stay silent, never fall back to a synth
+  // ── THREE INDEPENDENT LOOPS = LAYERED COMPOSITION ──────────────
+  // Loop A: MELODY — the main tune, quarter-note grid, mid register
+  // Loop B: BASS TEXTURE — half-note grid, low register, different grain
+  // Loop C: HIGH SHIMMER — eighth-note grid, sparse, high register
+  // Each uses a different captured grain as its "voice" and refreshes
+  // that voice periodically so the piece keeps evolving.
+  let loopA = null, loopB = null, loopC = null;
+  let grainA = null, grainB = null, grainC = null;
+  let motifA = [], motifB = [], motifC = [];
+  let idxA = 0, idxB = 0, idxC = 0;
+  let repA = 0, repB = 0;
 
-      if (!currentMotif.length || motifRepeatCount >= (state === 'outro' ? 1 : 2)) {
-        currentMotif = generatePhrase(state);
-        motifIdx = 0;
-        motifRepeatCount = 0;
-        // Pick the "instrument" for this phrase — reusing one recorded grain
-        // across an entire phrase is what makes it read as a tune played on
-        // one voice, rather than a different sound on every single note.
-        leadGrain = pickGrain();
-        answerGrain = state === 'chorus' ? pickGrain() : null;
-        if (!currentMotif.length) return;
+  function makeLayer(interval, octaveBase, restProb, velBase, getMotif, getGrain, getGrainRef, setGrainRef, getIdx, setIdx, getRep, setRep, maxRep) {
+    return new Tone.Loop((time) => {
+      const state = getCurrentState();
+      if (!sampleBank.length) return;
+      if (state === 'outro' && Math.random() < 0.6) return; // thin out in outro
+
+      let motif = getMotif();
+      if (!motif.length || getRep() >= maxRep) {
+        motif = generatePhrase(state === 'intro' ? 'verse' : state);
+        // mutate so each layer sounds different even from the same phrase bank
+        if (octaveBase === 0) motif = motif.map(s => ({ ...s, octave: 0, restProb: 0.25 }));
+        if (octaveBase === 3) motif = motif.map(s => ({ ...s, octave: 3, restProb: 0.55, degree: (s.degree + 2) % 5 }));
+        setIdx(0); setRep(0);
+        // Refresh this layer's grain voice every few phrases
+        if (!getGrainRef() || Math.random() < 0.4) setGrainRef(pickGrain());
+        if (!motif.length) return;
       }
 
-      const stepDef = currentMotif[motifIdx % currentMotif.length];
-      motifIdx++;
-      if (motifIdx % currentMotif.length === 0) motifRepeatCount++;
-      if (!stepDef) return;
+      const step = motif[getIdx() % motif.length];
+      setIdx(getIdx() + 1);
+      if (getIdx() % motif.length === 0) setRep(getRep() + 1);
+      if (!step) return;
 
-      // Live room energy shapes density and register — quiet room = sparser,
-      // louder room = busier and reaches a register higher
-      const quietRoom = orbitEnergy < 0.006;
-      if (Math.random() < stepDef.restProb || (quietRoom && Math.random() < 0.35)) return;
+      if (Math.random() < step.restProb) return;
+      // In intro/verse, bass and shimmer layers are sparser
+      if (octaveBase !== 1 && state === 'intro' && Math.random() < 0.6) return;
+      if (octaveBase !== 1 && state === 'verse' && Math.random() < 0.35) return;
 
-      const loudRoom = orbitEnergy > 0.05;
-      const oct = stepDef.octave + (loudRoom ? 1 : 0);
-      const freq = degreeFreq(oct, stepDef.degree);
-      const baseVel = state === 'chorus' ? 0.62 : state === 'outro' ? 0.45 : 0.5;
-      const vel = Math.min(0.95, baseVel + Math.min(0.3, orbitEnergy * 4));
+      const freq = degreeFreq(step.octave, step.degree);
+      const vel = Math.min(0.9, velBase + Math.min(0.25, orbitEnergy * 3));
+      const noteDur = Tone.Time(interval).toSeconds() * 0.88;
+      playGrainAtFreq(freq, time, vel, noteDur, null, getGrainRef());
+    }, interval);
+  }
 
-      // Notes get the actual grid-length of one step (eighth/quarter/half
-      // note at the current tempo) so the engine genuinely holds a pitch for
-      // a musical duration, not however long the field recording happened to be.
-      const noteDur = Tone.Time(subdivisionForState(state)).toSeconds() * 0.92;
+  function startMelodyEngine() {
+    if (loopA) return;
 
-      // Occasional call-and-response in chorus: answer the lead voice with a
-      // second recorded grain instead of one flat, unchanging texture
-      const grain = (answerGrain && Math.random() < 0.3) ? answerGrain : leadGrain;
-      playGrainAtFreq(freq, time, vel, noteDur, null, grain);
-    }, subdivisionForState(getCurrentState()));
-    melodyLoop.start(0);
+    // LAYER A — melody, quarter notes, mid register
+    loopA = makeLayer('4n', 1, 0.12, 0.55,
+      () => motifA, () => grainA, () => grainA, g => grainA = g,
+      () => idxA, v => idxA = v, () => repA, v => repA = v, 3);
+
+    // LAYER B — bass texture, half notes, low register  
+    loopB = makeLayer('2n', 0, 0.25, 0.38,
+      () => motifB, () => grainB, () => grainB, g => grainB = g,
+      () => idxB, v => idxB = v, () => repB, v => repB = v, 4);
+
+    // LAYER C — shimmer, eighth notes, high register, very sparse
+    loopC = new Tone.Loop((time) => {
+      const state = getCurrentState();
+      if (!sampleBank.length || state === 'intro') return;
+      if (Math.random() < (state === 'verse' ? 0.75 : 0.55)) return;
+      if (!grainC || Math.random() < 0.15) grainC = pickGrain();
+      const deg = Math.floor(Math.random() * 5);
+      const freq = degreeFreq(3, deg);
+      const vel = 0.22 + Math.random() * 0.18;
+      playGrainAtFreq(freq, time, vel, Tone.Time('8n').toSeconds() * 0.7, null, grainC);
+    }, '8n');
+
+    // Stagger starts so layers don't all hit beat 1 simultaneously
+    loopA.start(0);
+    loopB.start(Tone.Time('2n').toSeconds());
+    loopC.start(Tone.Time('1n').toSeconds());
   }
 
   function stopMelodyEngine() {
-    if (melodyLoop) { melodyLoop.stop(); melodyLoop.dispose(); melodyLoop = null; }
-    if (flutterLoop) { flutterLoop.stop(); flutterLoop.dispose(); flutterLoop = null; }
-    currentMotif = []; motifIdx = 0; motifRepeatCount = 0;
-    leadGrain = null; answerGrain = null;
+    [loopA, loopB, loopC, flutterLoop].forEach(l => { if (l) { try { l.stop(); l.dispose(); } catch(e) {} } });
+    loopA = loopB = loopC = flutterLoop = null;
+    motifA = []; motifB = []; motifC = [];
+    idxA = idxB = idxC = repA = repB = 0;
+    grainA = grainB = grainC = null;
   }
 
   // ── SONG STATE MACHINE ────────────────────────────────────────
@@ -1118,12 +1145,8 @@ const FW = (function(){
     const t = nativeCtx.currentTime;
     const RAMP = 3.0;
 
-    // Force a fresh phrase + grid spacing whenever the section changes, so
-    // the melody actually changes shape with the song instead of just volume
-    currentMotif = [];
-    motifIdx = 0;
-    motifRepeatCount = 0;
-    if (melodyLoop) melodyLoop.interval = subdivisionForState(state);
+    // Reset all layer motifs so each section starts a fresh phrase
+    motifA = []; motifB = []; idxA = idxB = idxC = repA = repB = 0;
 
     switch(state) {
       case 'intro':
@@ -1468,15 +1491,18 @@ const FW = (function(){
     startIntroSequence();
     Tone.Transport.start();
     startMelodyEngine();
-    // If environment is very quiet, seed the bank after 5s so melody can start
-    setTimeout(() => {
-      if (sampleBank.length === 0 && analyserBuf) {
-        const sr = nativeCtx.sampleRate;
-        analyserNode.getFloatTimeDomainData(analyserBuf);
-        addToBank(new Float32Array(analyserBuf), sr, null);
-        log('SEEDED from ambient room tone — melody will begin');
-      }
-    }, 5000);
+    // Seed bank immediately with room tone so melody can start right away,
+    // then keep topping up every 2s so there's always fresh material
+    const seedBank = () => {
+      if (!running || !analyserBuf) return;
+      analyserNode.getFloatTimeDomainData(analyserBuf);
+      addToBank(new Float32Array(analyserBuf), nativeCtx.sampleRate, null);
+    };
+    setTimeout(seedBank, 800);
+    setTimeout(seedBank, 2000);
+    setTimeout(seedBank, 4000);
+    // After 6s, top up every 3s with whatever the mic is hearing
+    const autoSeed = setInterval(() => { if (!running) { clearInterval(autoSeed); return; } seedBank(); }, 3000);
     rafId = requestAnimationFrame(mainLoop);
     log('FIELDWORK ACTIVE · listening to environment');
   }
