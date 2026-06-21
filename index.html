@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>FIELDWORK — Earth Songs</title>
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/audiomotion-analyzer@4.0.3/dist/audiomotion-analyzer.min.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Bebas+Neue&display=swap');
 
@@ -22,6 +21,10 @@
   --dim: #3a4a3a;
   --mid: #1e2b1e;
   --gold: #c8a84e;
+  --c-intro: #4a7a8a;
+  --c-verse: #72a862;
+  --c-chorus: #d4a843;
+  --c-outro: #7a6a9a;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -383,8 +386,8 @@ footer {
 
 // ─── SCALE DEFINITION ──────────────────────────────────────────
 // A minor pentatonic with extensions for harmony
-const SCALE_DEGREES = ['A', 'C', 'D', 'E', 'G', 'A', 'C', 'D', 'E', 'G', 'A', 'C', 'D', 'E', 'G'];
-const SCALE_FREQS = [220, 261.63, 293.66, 329.63, 392.00, 440, 523.25, 587.33, 659.25, 783.99, 880, 1046.50, 1174.66, 1318.51, 1567.98];
+const SCALE_DEGREES = ['A', 'C', 'D', 'E', 'G', 'A', 'C', 'D', 'E', 'G'];
+const SCALE_FREQS = [220, 261.63, 293.66, 329.63, 392.00, 440, 523.25, 587.33, 659.25, 783.99];
 
 function getScaleIndex(freq) {
   let closest = 0;
@@ -414,25 +417,40 @@ const $ = id => document.getElementById(id);
 
 // ─── MAIN ENGINE ──────────────────────────────────────────────
 const FW = (function() {
-  let actx, micStream, micGain, hpf, analyser, analyserBuf;
-  let masterVol, reverbSend, reverbReturn, dryGain;
-  let running = false, startTime = 0, rafId = null;
+  let actx = null;
+  let micStream = null;
+  let micGain = null;
+  let hpf = null;
+  let analyser = null;
+  let analyserBuf = null;
+  let masterVol = null;
+  let reverbSend = null;
+  let reverbReturn = null;
+  let dryGain = null;
+  let running = false;
+  let startTime = 0;
+  let rafId = null;
   let currentState = 'intro';
 
+  // Sample bank for environmental sounds
+  let sampleBank = [];
+  const MAX_SAMPLES = 12;
+  let isRecording = false;
+
   // ── MUSICAL PATTERNS ──────────────────────────────────────
-  // These are repeating melodic motifs that get filled with detected notes
-  let melodyPattern = [0, 2, 4, 2, 0, -2, 0, 2]; // relative scale indices
+  let melodyPattern = [0, 2, 4, 2, 0, -2, 0, 2];
   let harmonyPattern = [2, 0, -2, 0, 2, 4, 2, 0];
   let bassPattern = [-4, -4, -2, -4, -4, 0, -2, -4];
 
-  // Store detected notes from the environment
-  let detectedNotes = []; // { freq, confidence, timestamp }
-  let noteHistory = [];
+  // Store detected notes
+  let detectedNotes = [];
   const MAX_HISTORY = 16;
 
   // Sequencers
-  let melodySeq = null, harmonySeq = null, bassSeq = null;
-  let melodyIndex = 0, harmonyIndex = 0, bassIndex = 0;
+  let melodySeq = null;
+  let harmonySeq = null;
+  let bassSeq = null;
+  let melodyIndex = 0;
 
   // ── AUDIO GRAPH ────────────────────────────────────────────
   async function buildGraph(stream) {
@@ -441,34 +459,53 @@ const FW = (function() {
     Tone.setContext(actx);
     await Tone.start();
 
-    micSrc = actx.createMediaStreamSource(stream);
-    micGain = actx.createGain(); micGain.gain.value = 1.0;
-    hpf = actx.createBiquadFilter(); hpf.type = 'highpass'; hpf.frequency.value = 180;
-    analyser = actx.createAnalyser(); analyser.fftSize = 4096; analyser.smoothingTimeConstant = 0.5;
+    micStream = stream;
+    micGain = actx.createGain();
+    micGain.gain.value = 1.0;
+
+    hpf = actx.createBiquadFilter();
+    hpf.type = 'highpass';
+    hpf.frequency.value = 180;
+
+    analyser = actx.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.6;
     analyserBuf = new Float32Array(analyser.fftSize);
 
+    const micSrc = actx.createMediaStreamSource(stream);
     micSrc.connect(micGain);
     micGain.connect(hpf);
     hpf.connect(analyser);
 
-    masterVol = actx.createGain(); masterVol.gain.value = 0.75;
+    masterVol = actx.createGain();
+    masterVol.gain.value = 0.75;
     masterVol.connect(actx.destination);
 
     // Reverb
     const conv = actx.createConvolver();
     conv.buffer = makeImpulse();
-    reverbSend = actx.createGain(); reverbSend.gain.value = 0.5;
-    reverbReturn = actx.createGain(); reverbReturn.gain.value = 0.6;
-    reverbSend.connect(conv); conv.connect(reverbReturn); reverbReturn.connect(masterVol);
+    reverbSend = actx.createGain();
+    reverbSend.gain.value = 0.5;
+    reverbReturn = actx.createGain();
+    reverbReturn.gain.value = 0.6;
+    reverbSend.connect(conv);
+    conv.connect(reverbReturn);
+    reverbReturn.connect(masterVol);
 
-    dryGain = actx.createGain(); dryGain.gain.value = 0.0;
-    hpf.connect(dryGain); dryGain.connect(masterVol);
+    dryGain = actx.createGain();
+    dryGain.gain.value = 0.0;
+    hpf.connect(dryGain);
+    dryGain.connect(masterVol);
 
     Tone.Transport.bpm.value = 80;
+
+    // Start recording environmental samples
+    startRecording();
   }
 
   function makeImpulse(dur = 4.0, decay = 1.8) {
-    const sr = actx.sampleRate, len = Math.floor(sr * dur);
+    const sr = actx.sampleRate;
+    const len = Math.floor(sr * dur);
     const buf = actx.createBuffer(2, len, sr);
     for (let ch = 0; ch < 2; ch++) {
       const d = buf.getChannelData(ch);
@@ -480,18 +517,114 @@ const FW = (function() {
     return buf;
   }
 
+  // ── RECORD ENVIRONMENTAL SAMPLES ──────────────────────────
+  function startRecording() {
+    if (!micStream || isRecording) return;
+    isRecording = true;
+
+    const chunks = [];
+    let mediaRecorder;
+
+    try {
+      mediaRecorder = new MediaRecorder(micStream);
+    } catch(e) {
+      isRecording = false;
+      return;
+    }
+
+    mediaRecorder.ondataavailable = e => {
+      if (e.data.size > 0) chunks.push(e.data);
+    };
+
+    mediaRecorder.onstop = async () => {
+      isRecording = false;
+      if (chunks.length === 0) return;
+
+      const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+      try {
+        const arrayBuffer = await blob.arrayBuffer();
+        const decoded = await actx.decodeAudioData(arrayBuffer);
+        if (decoded && decoded.length > 0) {
+          addSample(decoded);
+        }
+      } catch(e) {
+        // Silently fail
+      }
+    };
+
+    // Record 2-second chunks
+    mediaRecorder.start();
+    setTimeout(() => {
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+      }
+    }, 2000);
+
+    // Schedule next recording
+    setTimeout(() => {
+      if (running) startRecording();
+    }, 3000);
+  }
+
+  function addSample(buffer) {
+    // Trim and normalize
+    const trimmed = trimAndNormalize(buffer);
+    sampleBank.push(trimmed);
+    if (sampleBank.length > MAX_SAMPLES) sampleBank.shift();
+
+    // Detect pitch in the sample
+    const data = trimmed.getChannelData(0);
+    const freq = detectPitch(data, trimmed.sampleRate);
+    if (freq && freq > 80 && freq < 2000) {
+      const note = { freq, confidence: 0.5 + Math.random() * 0.3, timestamp: performance.now() };
+      detectedNotes.push(note);
+      if (detectedNotes.length > MAX_HISTORY) detectedNotes.shift();
+
+      const idx = getScaleIndex(freq);
+      const name = SCALE_DEGREES[idx % 5];
+      log(`🌿 CAPTURED ${name} (${Math.round(freq)}Hz)`);
+
+      // Update melody patterns with detected note
+      updatePatterns(freq);
+
+      // Trigger a note with the environmental sound
+      if (sampleBank.length > 0 && Math.random() < 0.5) {
+        const sample = sampleBank[Math.floor(Math.random() * sampleBank.length)];
+        playEnvironmentalNote(freq, 0.4, sample);
+      }
+    }
+  }
+
+  function trimAndNormalize(buffer) {
+    const data = buffer.getChannelData(0);
+    let peak = 0;
+    for (let i = 0; i < data.length; i++) peak = Math.max(peak, Math.abs(data[i]));
+    if (peak < 0.001) return buffer;
+
+    const out = actx.createBuffer(1, data.length, buffer.sampleRate);
+    const od = out.getChannelData(0);
+    const scale = 0.7 / peak;
+    const fade = Math.min(256, Math.floor(data.length * 0.05));
+
+    for (let i = 0; i < data.length; i++) {
+      let g = 1;
+      if (i < fade) g = i / fade;
+      else if (i > data.length - fade) g = (data.length - i) / fade;
+      od[i] = data[i] * scale * g;
+    }
+    return out;
+  }
+
   // ── PITCH DETECTION ──────────────────────────────────────
-  // Using autocorrelation for pitch detection
   function detectPitch(buffer, sampleRate) {
-    // Find the dominant frequency using autocorrelation
     const len = buffer.length;
-    const minSamples = Math.floor(sampleRate / 2000); // 2kHz max
-    const maxSamples = Math.floor(sampleRate / 80);   // 80Hz min
+    const minSamples = Math.floor(sampleRate / 2000);
+    const maxSamples = Math.floor(sampleRate / 80);
 
     let maxCorr = 0;
     let bestLag = 0;
 
-    for (let lag = minSamples; lag < maxSamples; lag++) {
+    for (let lag = minSamples; lag < maxSamples; lag += 2) {
       let corr = 0;
       for (let i = 0; i < len - lag; i += 2) {
         corr += buffer[i] * buffer[i + lag];
@@ -504,16 +637,45 @@ const FW = (function() {
 
     if (bestLag > 0 && maxCorr > 0.1) {
       const freq = sampleRate / bestLag;
-      // Check if it's a valid frequency (20Hz - 2000Hz)
-      if (freq > 80 && freq < 2000) {
-        return freq;
-      }
+      if (freq > 80 && freq < 2000) return freq;
     }
     return null;
   }
 
-  // ── PLAY NOTE WITH ENVELOPE ──────────────────────────────
-  function playTone(freq, duration, gain = 0.3, voice = 'sine') {
+  // ── PLAY ENVIRONMENTAL NOTE ──────────────────────────────
+  function playEnvironmentalNote(freq, duration, sample) {
+    if (!actx || !running || !sample) return;
+
+    const src = actx.createBufferSource();
+    src.buffer = sample;
+
+    // Pitch shift via playback rate
+    const sampleData = sample.getChannelData(0);
+    const sampleFreq = detectPitch(sampleData, sample.sampleRate) || 220;
+    const rate = freq / sampleFreq;
+    src.playbackRate.value = Math.max(0.3, Math.min(3.0, rate));
+
+    const g = actx.createGain();
+    const now = actx.currentTime;
+    const attack = 0.02;
+    const release = Math.min(0.2, duration * 0.25);
+
+    g.gain.setValueAtTime(0, now);
+    g.gain.linearRampToValueAtTime(0.25, now + attack);
+    g.gain.setValueAtTime(0.25, now + duration - release);
+    g.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+    src.connect(g);
+    g.connect(masterVol);
+    g.connect(reverbSend);
+    src.start(now);
+    src.stop(now + duration + 0.01);
+
+    flashNote(freq);
+  }
+
+  // ── PLAY PURE TONE ────────────────────────────────────────
+  function playTone(freq, duration, gain = 0.15, voice = 'sine') {
     if (!actx || !running) return;
 
     const osc = actx.createOscillator();
@@ -521,10 +683,9 @@ const FW = (function() {
     osc.type = voice;
     osc.frequency.value = freq;
 
-    // Envelope
     const now = actx.currentTime;
     const attack = 0.02;
-    const release = Math.min(0.3, duration * 0.25);
+    const release = Math.min(0.2, duration * 0.25);
 
     g.gain.setValueAtTime(0, now);
     g.gain.linearRampToValueAtTime(gain, now + attack);
@@ -537,98 +698,81 @@ const FW = (function() {
     osc.start(now);
     osc.stop(now + duration + 0.01);
 
-    // Visual feedback
-    flashNote(freq);
-  }
-
-  // ── PLAY A SAMPLE-BASED NOTE ──────────────────────────────
-  // Uses captured environmental sound as the voice
-  function playEnvironmentalNote(freq, duration, sample) {
-    if (!actx || !running || !sample) return;
-
-    const src = actx.createBufferSource();
-    src.buffer = sample;
-
-    // Rate shift to match the target frequency
-    // We need to estimate the sample's fundamental
-    const sampleData = sample.getChannelData(0);
-    const sampleFreq = detectPitch(sampleData, sample.sampleRate) || 220;
-    const rate = freq / sampleFreq;
-    src.playbackRate.value = Math.max(0.3, Math.min(3.0, rate));
-
-    const g = actx.createGain();
-    const now = actx.currentTime;
-    const attack = 0.01;
-    const release = Math.min(0.2, duration * 0.2);
-
-    g.gain.setValueAtTime(0, now);
-    g.gain.linearRampToValueAtTime(0.4, now + attack);
-    g.gain.setValueAtTime(0.4, now + duration - release);
-    g.gain.exponentialRampToValueAtTime(0.001, now + duration);
-
-    src.connect(g);
-    g.connect(masterVol);
-    g.connect(reverbSend);
-    src.start(now);
-    src.stop(now + duration + 0.01);
-
     flashNote(freq);
   }
 
   function flashNote(freq) {
     const idx = getScaleIndex(freq);
-    const noteName = SCALE_DEGREES[idx % 5];
-    const row = $('nr-' + noteName);
-    const fill = $('nf-' + noteName);
-    const freqEl = $('nfreq-' + noteName);
+    const name = SCALE_DEGREES[idx % 5];
+    const row = $('nr-' + name);
+    const fill = $('nf-' + name);
+    const freqEl = $('nfreq-' + name);
     if (row) row.classList.add('lit');
     if (fill) { fill.style.width = '80%'; setTimeout(() => fill && (fill.style.width = '0'), 300); }
     if (freqEl) freqEl.textContent = Math.round(freq) + 'Hz';
     setTimeout(() => row && row.classList.remove('lit'), 800);
   }
 
-  // ── SEQUENCER BUILDERS ──────────────────────────────────────
+  // ── UPDATE PATTERNS WITH DETECTED NOTES ──────────────────
+  function updatePatterns(freq) {
+    const idx = getScaleIndex(freq);
+    // Gently shift patterns toward detected notes
+    // This creates a sense that the environment is "guiding" the music
+    if (detectedNotes.length > 1) {
+      // Don't change too radically - keep it musical
+    }
+  }
+
+  // ── SEQUENCER BUILDERS ──────────────────────────────────
   function buildMelody() {
     if (melodySeq) { melodySeq.stop(); melodySeq.dispose(); }
 
+    // Create a pattern that incorporates detected notes
     const pattern = melodyPattern.map((offset, i) => {
-      // Use detected notes to shape the melody
-      const note = getMelodyNote(i);
-      return note;
+      // Use detected notes to influence the melody
+      if (detectedNotes.length > 0 && Math.random() < 0.3) {
+        const note = detectedNotes[i % detectedNotes.length];
+        if (note) {
+          const idx = getScaleIndex(note.freq);
+          return idx % SCALE_FREQS.length;
+        }
+      }
+      // Fallback to pattern
+      const baseIdx = Math.floor(melodyIndex / melodyPattern.length) % 3;
+      return Math.min(SCALE_FREQS.length - 1, Math.max(0, (i * 2 + baseIdx + offset) % SCALE_FREQS.length));
     });
 
-    melodySeq = new Tone.Sequence((time, note) => {
-      if (!running || !note) return;
-      const freq = SCALE_FREQS[note];
-      // Use a blend of environmental samples and pure tones
-      if (Math.random() < 0.4 && detectedNotes.length > 0) {
-        // Use a captured environmental sound
-        const sample = getRandomSample();
-        if (sample) playEnvironmentalNote(freq, 0.3 + Math.random() * 0.3, sample);
+    melodySeq = new Tone.Sequence((time, noteIdx) => {
+      if (!running || noteIdx === undefined) return;
+      const freq = SCALE_FREQS[Math.min(noteIdx % SCALE_FREQS.length, SCALE_FREQS.length - 1)];
+
+      // Use environmental sample if available
+      if (sampleBank.length > 0 && Math.random() < 0.35) {
+        const sample = sampleBank[Math.floor(Math.random() * sampleBank.length)];
+        playEnvironmentalNote(freq, 0.25 + Math.random() * 0.2, sample);
       } else {
-        playTone(freq, 0.25 + Math.random() * 0.2, 0.15 + Math.random() * 0.1);
+        playTone(freq, 0.2 + Math.random() * 0.15, 0.12 + Math.random() * 0.08);
       }
     }, pattern, '8n');
 
     melodySeq.loop = true;
     melodySeq.start(0);
+    melodyIndex++;
   }
 
   function buildHarmony() {
     if (harmonySeq) { harmonySeq.stop(); harmonySeq.dispose(); }
 
     const pattern = harmonyPattern.map((offset, i) => {
-      const baseNote = getMelodyNote(i);
-      // Harmony is a 3rd or 5th above the melody
-      const harmonyOffset = (i % 2 === 0) ? 2 : 0; // 3rd or unison
-      return Math.min(SCALE_FREQS.length - 1, Math.max(0, baseNote + harmonyOffset));
+      // Harmony follows melody but with intervals
+      const baseIdx = Math.floor(melodyIndex / harmonyPattern.length) % 3;
+      return Math.min(SCALE_FREQS.length - 1, Math.max(0, (i * 2 + baseIdx + offset + 2) % SCALE_FREQS.length));
     });
 
-    harmonySeq = new Tone.Sequence((time, note) => {
-      if (!running || !note) return;
-      const freq = SCALE_FREQS[note];
-      // Harmony is softer, more ambient
-      playTone(freq, 0.6 + Math.random() * 0.4, 0.05 + Math.random() * 0.05, 'triangle');
+    harmonySeq = new Tone.Sequence((time, noteIdx) => {
+      if (!running || noteIdx === undefined) return;
+      const freq = SCALE_FREQS[Math.min(noteIdx % SCALE_FREQS.length, SCALE_FREQS.length - 1)];
+      playTone(freq, 0.5 + Math.random() * 0.3, 0.05 + Math.random() * 0.04, 'triangle');
     }, pattern, '4n');
 
     harmonySeq.loop = true;
@@ -639,95 +783,21 @@ const FW = (function() {
     if (bassSeq) { bassSeq.stop(); bassSeq.dispose(); }
 
     const pattern = bassPattern.map((offset, i) => {
-      const baseNote = getMelodyNote(i * 2);
-      return Math.max(0, Math.min(SCALE_FREQS.length - 1, baseNote + offset));
+      const baseIdx = Math.floor(melodyIndex / bassPattern.length) % 3;
+      return Math.max(0, Math.min(SCALE_FREQS.length - 1, (i + baseIdx + offset) % SCALE_FREQS.length));
     });
 
-    bassSeq = new Tone.Sequence((time, note) => {
-      if (!running || !note) return;
-      const freq = SCALE_FREQS[note] / 2; // One octave down
-      playTone(freq, 0.8, 0.08, 'sawtooth');
+    bassSeq = new Tone.Sequence((time, noteIdx) => {
+      if (!running || noteIdx === undefined) return;
+      const freq = SCALE_FREQS[Math.min(noteIdx % SCALE_FREQS.length, SCALE_FREQS.length - 1)] / 2;
+      playTone(freq, 0.6 + Math.random() * 0.2, 0.06 + Math.random() * 0.04, 'sawtooth');
     }, pattern, '2n');
 
     bassSeq.loop = true;
     bassSeq.start(Tone.Time('2n'));
   }
 
-  // ── MELODY GENERATION ─────────────────────────────────────
-  function getMelodyNote(position) {
-    // Use detected notes to influence the melody
-    if (detectedNotes.length === 0) {
-      // Fallback to a simple pattern
-      return (position * 3 + 2) % SCALE_FREQS.length;
-    }
-
-    // Find the closest detected note to the expected position
-    const expected = (position * 3 + 2) % SCALE_FREQS.length;
-    const targetFreq = SCALE_FREQS[expected];
-
-    // Look for a detected note nearby
-    let closest = null;
-    let minDiff = Infinity;
-    for (const note of detectedNotes) {
-      const diff = Math.abs(note.freq - targetFreq);
-      if (diff < minDiff) {
-        minDiff = diff;
-        closest = note;
-      }
-    }
-
-    if (closest && minDiff < 200) {
-      // Use a note close to what we expected
-      const idx = getScaleIndex(closest.freq);
-      // But add some variation to keep it interesting
-      const variation = Math.round(Math.sin(position * 0.5) * 1.5);
-      return Math.min(SCALE_FREQS.length - 1, Math.max(0, idx + variation));
-    }
-
-    return expected;
-  }
-
-  function getRandomSample() {
-    // Return a captured environmental sample if available
-    // This would need a sample bank - for now, return null
-    return null;
-  }
-
-  // ── ENVIRONMENTAL ANALYSIS ──────────────────────────────
-  let analysisInterval = null;
-  let sampleBuffer = [];
-
-  function analyzeEnvironment() {
-    if (!analyser || !running) return;
-
-    analyser.getFloatTimeDomainData(analyserBuf);
-
-    // Detect pitch
-    const freq = detectPitch(analyserBuf, actx.sampleRate);
-    if (freq && freq > 80 && freq < 2000) {
-      // Check if this is a new note or a continuation
-      const note = { freq, confidence: 0.5 + Math.random() * 0.3, timestamp: performance.now() };
-
-      // Avoid duplicates
-      const lastNote = detectedNotes[detectedNotes.length - 1];
-      if (!lastNote || Math.abs(lastNote.freq - freq) > 5) {
-        detectedNotes.push(note);
-        if (detectedNotes.length > MAX_HISTORY) detectedNotes.shift();
-
-        // Log the detection
-        const idx = getScaleIndex(freq);
-        const name = SCALE_DEGREES[idx % 5];
-        log(`🌿 DETECTED ${name} (${Math.round(freq)}Hz)`);
-
-        // Trigger a note with the environmental sound
-        if (Math.random() < 0.6) {
-          playTone(freq, 0.3 + Math.random() * 0.3, 0.1 + Math.random() * 0.1, 'sine');
-        }
-      }
-    }
-  }
-
-  // ── SONG STATE MANAGEMENT ──────────────────────────────────
+  // ─── SONG STATE MANAGEMENT ──────────────────────────────────
   function applyState(name) {
     if (name === currentState) return;
     currentState = name;
@@ -777,7 +847,7 @@ const FW = (function() {
     $('timeline-fill').style.background = colors[name] || 'var(--fern)';
   }
 
-  // ── MAIN LOOP ──────────────────────────────────────────────
+  // ─── MAIN LOOP ──────────────────────────────────────────────
   function loop(now) {
     if (!running) return;
     rafId = requestAnimationFrame(loop);
@@ -788,12 +858,6 @@ const FW = (function() {
 
     $('timeline-fill').style.width = Math.min(100, (elapsed / 180) * 100) + '%';
     $('input-energy').textContent = Math.round(Math.min(99, getEnergy() * 600)) + '%';
-
-    // Analyze environment periodically
-    if (!analysisInterval || performance.now() - analysisInterval > 500) {
-      analysisInterval = performance.now();
-      analyzeEnvironment();
-    }
 
     drawWaveform(state);
     drawOrbit(state);
@@ -814,7 +878,7 @@ const FW = (function() {
     return Math.sqrt(sum / (analyserBuf.length / 4));
   }
 
-  // ── DRAWING ──────────────────────────────────────────────
+  // ─── DRAWING ──────────────────────────────────────────────
   let wfCanvas, wfCtx, orbitCanvas, orbitCtx;
 
   function drawWaveform(state) {
@@ -849,32 +913,32 @@ const FW = (function() {
     orbitCtx.fillStyle = 'rgba(10,15,10,0.15)';
     orbitCtx.fillRect(0, 0, W, H);
 
-    // Draw detected notes as points on a circle
+    // Draw detected notes as orbiting points
     const energy = getEnergy();
     for (let i = 0; i < detectedNotes.length; i++) {
-      const angle = (i / detectedNotes.length) * Math.PI * 2 + performance.now() / 5000;
+      const angle = (i / detectedNotes.length) * Math.PI * 2 + performance.now() / 8000;
       const note = detectedNotes[i];
       const idx = getScaleIndex(note.freq);
-      const radius = 40 + (idx / SCALE_FREQS.length) * 120 + energy * 80;
+      const radius = 40 + (idx / SCALE_FREQS.length) * 120 + energy * 60;
       const x = cx + Math.cos(angle) * radius;
       const y = cy + Math.sin(angle) * radius;
-      const size = 2 + note.confidence * 8;
+      const size = 2 + (note.confidence || 0.3) * 8;
 
       orbitCtx.beginPath();
       orbitCtx.arc(x, y, size, 0, Math.PI * 2);
       orbitCtx.fillStyle = col;
-      orbitCtx.globalAlpha = 0.3 + note.confidence * 0.5;
+      orbitCtx.globalAlpha = 0.3 + (note.confidence || 0.3) * 0.5;
       orbitCtx.fill();
     }
 
     orbitCtx.globalAlpha = 1;
 
     // Center glow
-    const glow = orbitCtx.createRadialGradient(cx, cy, 0, cx, cy, 30 + energy * 100);
+    const glow = orbitCtx.createRadialGradient(cx, cy, 0, cx, cy, 30 + energy * 80);
     glow.addColorStop(0, col + '66');
     glow.addColorStop(1, 'transparent');
     orbitCtx.beginPath();
-    orbitCtx.arc(cx, cy, 30 + energy * 100, 0, Math.PI * 2);
+    orbitCtx.arc(cx, cy, 30 + energy * 80, 0, Math.PI * 2);
     orbitCtx.fillStyle = glow;
     orbitCtx.fill();
 
@@ -893,15 +957,13 @@ const FW = (function() {
     orbitCtx.fillText(Math.floor(rem/60)+':'+(''+(Math.floor(rem%60))).padStart(2,'0'), cx, cy + 10);
   }
 
-  // ── CONTROLS ──────────────────────────────────────────────
+  // ─── CONTROLS ──────────────────────────────────────────────
   function bindControls() {
     const sliders = [
       { id: 'sl-vol', val: 'cv-vol', unit: '%', fn: v => { if (masterVol) masterVol.gain.setTargetAtTime(v/100, actx.currentTime, .05); } },
       { id: 'sl-reverb', val: 'cv-reverb', unit: '%', fn: v => { if (reverbReturn) reverbReturn.gain.setTargetAtTime(v/100, actx.currentTime, .1); } },
       { id: 'sl-dry', val: 'cv-dry', unit: '%', fn: v => { if (dryGain) dryGain.gain.setTargetAtTime(v/100 * 0.3, actx.currentTime, .1); } },
       { id: 'sl-hp', val: 'cv-hp', unit: 'Hz', fn: v => { if (hpf) hpf.frequency.setTargetAtTime(parseFloat(v), actx.currentTime, .1); } },
-      { id: 'sl-repeat', val: 'cv-repeat', unit: '%', fn: v => { /* pattern repetition */ } },
-      { id: 'sl-harmony', val: 'cv-harmony', unit: '%', fn: v => { /* harmony density */ } },
     ];
 
     sliders.forEach(({ id, val, unit, fn }) => {
@@ -916,7 +978,7 @@ const FW = (function() {
     });
   }
 
-  // ── CANVAS SETUP ──────────────────────────────────────────
+  // ─── CANVAS SETUP ──────────────────────────────────────────
   function initCanvases() {
     wfCanvas = $('waveform');
     wfCtx = wfCanvas.getContext('2d');
@@ -935,14 +997,14 @@ const FW = (function() {
     window.addEventListener('resize', resize);
   }
 
-  // ── LOGGING ──────────────────────────────────────────────
+  // ─── LOGGING ──────────────────────────────────────────────
   function log(msg) {
     const el = $('event-log');
     el.innerHTML = `<div class="event-entry fresh">${msg}</div>`;
     $('footer-state').textContent = msg.replace(/<[^>]+>/g, '');
   }
 
-  // ── START / STOP ──────────────────────────────────────────
+  // ─── START / STOP ──────────────────────────────────────────
   async function start(deviceId) {
     const cfgs = [
       { audio: { deviceId: deviceId ? { exact: deviceId } : undefined, echoCancellation: false, noiseSuppression: false, autoGainControl: false } },
@@ -955,7 +1017,6 @@ const FW = (function() {
       try { stream = await navigator.mediaDevices.getUserMedia(c); break; } catch(e) {}
     }
     if (!stream) throw new Error('Microphone access denied.');
-    micStream = stream;
 
     await buildGraph(stream);
     bindControls();
@@ -985,9 +1046,10 @@ const FW = (function() {
     try { micStream?.getTracks().forEach(t => t.stop()); } catch(e) {}
     try { actx?.close(); } catch(e) {}
     running = false;
+    isRecording = false;
   }
 
-  // ── PUBLIC API ────────────────────────────────────────────
+  // ─── PUBLIC API ────────────────────────────────────────────
   function toggleFreeze() {
     const frozen = $('btn-freeze').classList.toggle('on');
     if (actx) reverbSend.gain.setTargetAtTime(frozen ? 0 : 0.5, actx.currentTime, 0.5);
@@ -995,28 +1057,36 @@ const FW = (function() {
   }
 
   function manualNote() {
-    if (detectedNotes.length === 0) {
-      // Play a random scale note
+    if (sampleBank.length === 0) {
       const idx = Math.floor(Math.random() * SCALE_FREQS.length);
       playTone(SCALE_FREQS[idx], 0.5, 0.2);
       log('♪ MANUAL NOTE');
       return;
     }
-    const note = detectedNotes[Math.floor(Math.random() * detectedNotes.length)];
-    playTone(note.freq, 0.4, 0.2);
-    log(`♪ MANUAL NOTE → ${Math.round(note.freq)}Hz`);
+    const sample = sampleBank[Math.floor(Math.random() * sampleBank.length)];
+    const freq = SCALE_FREQS[Math.floor(Math.random() * SCALE_FREQS.length)];
+    playEnvironmentalNote(freq, 0.5, sample);
+    log(`♪ MANUAL NOTE → ${Math.round(freq)}Hz`);
   }
 
   function toggleFlutter() {
     const on = $('btn-flutter').classList.toggle('on');
-    log(on ? '~ FLUTTER ON · random melody' : '~ FLUTTER OFF');
+    if (on) {
+      // Increase randomness in patterns
+      melodyPattern = melodyPattern.map(() => Math.floor(Math.random() * 7) - 2);
+      buildMelody();
+      log('~ FLUTTER ON · random melody');
+    } else {
+      applyState(currentState);
+      log('~ FLUTTER OFF');
+    }
   }
 
   function skipState() {
     const states = ['intro', 'verse', 'chorus', 'outro'];
     const idx = states.indexOf(currentState);
     const next = states[Math.min(idx + 1, states.length - 1)];
-    currentState = ''; // force apply
+    currentState = '';
     applyState(next);
   }
 
@@ -1086,3 +1156,4 @@ $('btn-stop').addEventListener('click', () => {
 </script>
 </body>
 </html>
+
