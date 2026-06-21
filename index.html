@@ -3,36 +3,30 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>FIELDWORK — Environment as Instrument</title>
+<title>FIELDWORK — Earth Songs</title>
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/audiomotion-analyzer@4.0.3/dist/audiomotion-analyzer.min.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Bebas+Neue&display=swap');
 
-/* ── TOKENS ──────────────────────────────────────────── */
 :root {
-  --ink:     #080c08;
-  --paper:   #e8efe3;
-  --moss:    #3a5e35;
-  --fern:    #72a862;
-  --dew:     #b8d4a8;
-  --mist:    #c8dfc0;
-  --amber:   #d4a843;
-  --rust:    #b85a2a;
-  --void:    #0d120d;
-  --dim:     #3a4a3a;
-  --mid:     #1e2b1e;
-
-  /* state accent colors */
-  --c-intro:  #4a7a8a;
-  --c-verse:  #72a862;
-  --c-chorus: #d4a843;
-  --c-outro:  #7a6a9a;
+  --ink: #080c08;
+  --paper: #e8efe3;
+  --moss: #3a5e35;
+  --fern: #72a862;
+  --dew: #b8d4a8;
+  --mist: #c8dfc0;
+  --amber: #d4a843;
+  --rust: #b85a2a;
+  --void: #0d120d;
+  --dim: #3a4a3a;
+  --mid: #1e2b1e;
+  --gold: #c8a84e;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; background: var(--void); color: var(--paper); font-family: 'Space Mono', monospace; overflow-x: hidden; cursor: crosshair; }
 
-/* ── LOADING ─────────────────────────────────────────── */
 #loading-screen {
   position: fixed; inset: 0; background: var(--void);
   display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -44,7 +38,6 @@ html, body { height: 100%; background: var(--void); color: var(--paper); font-fa
 .load-bar { width: 200px; height: 2px; background: var(--mid); overflow: hidden; }
 .load-fill { height: 100%; width: 0; background: var(--fern); transition: width .4s; }
 
-/* ── START ───────────────────────────────────────────── */
 #start-screen {
   display: flex; flex-direction: column; align-items: center;
   justify-content: center; min-height: 100vh; gap: 28px; padding: 40px 24px;
@@ -83,11 +76,9 @@ html, body { height: 100%; background: var(--void); color: var(--paper); font-fa
   color: var(--dim); text-align: center; line-height: 2.2; max-width: 300px;
 }
 
-/* ── MAIN ────────────────────────────────────────────── */
 #main-ui { display: none; flex-direction: column; min-height: 100vh; }
 #main-ui.visible { display: flex; }
 
-/* HEADER */
 .top-bar {
   padding: 18px 28px 14px;
   border-bottom: 1px solid var(--mid);
@@ -114,17 +105,14 @@ html, body { height: 100%; background: var(--void); color: var(--paper); font-fa
 }
 .stop-btn:hover { background: var(--rust); color: var(--paper); }
 
-/* BODY */
 .main-body { flex: 1; padding: 24px 28px 40px; display: flex; flex-direction: column; gap: 24px; max-width: 960px; width: 100%; margin: 0 auto; }
 
-/* ORBIT — the breath visualizer */
 #orbit-wrap {
   display: flex; justify-content: center; align-items: center; padding: 8px 0;
   position: relative;
 }
-#orbit-canvas { display: block; }
+#orbit-canvas { display: block; width: 100%; max-width: 320px; }
 
-/* STATE BAR */
 .state-bar {
   display: grid; grid-template-columns: repeat(4,1fr); gap: 1px;
   border: 1px solid var(--mid); overflow: hidden;
@@ -144,7 +132,6 @@ html, body { height: 100%; background: var(--void); color: var(--paper); font-fa
 .state-seg.active[data-state="outro"] .s-name { color: var(--c-outro); }
 .state-seg.active .s-desc { color: var(--paper); opacity: .5; }
 
-/* TIMELINE PROGRESS */
 .timeline-wrap { position: relative; }
 .timeline-track { height: 4px; background: var(--mid); overflow: hidden; }
 .timeline-fill { height: 100%; width: 0; background: var(--fern); transition: background .6s; }
@@ -156,7 +143,6 @@ html, body { height: 100%; background: var(--void); color: var(--paper); font-fa
 .timeline-mark:not(:first-child) { text-align: center; }
 .timeline-mark:last-child { text-align: right; }
 
-/* WAVEFORM + SCORE */
 .two-col { display: grid; grid-template-columns: 1fr 220px; gap: 8px; }
 @media(max-width:640px){ .two-col { grid-template-columns: 1fr; } }
 
@@ -170,7 +156,6 @@ html, body { height: 100%; background: var(--void); color: var(--paper); font-fa
 .panel-label span { color: var(--fern); }
 canvas.wave { display: block; width: 100%; background: transparent; }
 
-/* SCORE — the detected notes */
 .score-rows { display: flex; flex-direction: column; gap: 4px; }
 .score-row {
   display: flex; align-items: center; gap: 8px;
@@ -183,7 +168,6 @@ canvas.wave { display: block; width: 100%; background: transparent; }
 .score-row .note-fill { height: 100%; background: var(--amber); width: 0; transition: width .4s; }
 .score-row .note-freq { font-size: 7px; color: var(--dim); min-width: 40px; text-align: right; }
 
-/* CONTROLS */
 .controls-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 8px; }
 @media(max-width:500px){ .controls-grid { grid-template-columns: 1fr 1fr; } }
 
@@ -207,7 +191,6 @@ input.sl::-webkit-slider-thumb {
 }
 input.sl:hover::-webkit-slider-thumb { transform: scale(1.4); }
 
-/* EVENTS LOG */
 .event-log {
   background: var(--mid); border: 1px solid rgba(255,255,255,.06);
   padding: 12px 14px; font-size: 9px; color: var(--dim);
@@ -220,7 +203,6 @@ input.sl:hover::-webkit-slider-thumb { transform: scale(1.4); }
 .event-entry { color: var(--paper); opacity: .6; }
 .event-entry.fresh { opacity: 1; color: var(--fern); }
 
-/* PERF ACTIONS */
 .perf-row { display: grid; grid-template-columns: repeat(4,1fr); gap: 6px; }
 @media(max-width:500px){ .perf-row { grid-template-columns: 1fr 1fr; } }
 
@@ -285,12 +267,10 @@ footer {
 
   <div class="main-body">
 
-    <!-- ORBIT VISUALIZER -->
     <div id="orbit-wrap">
       <canvas id="orbit-canvas" width="320" height="320"></canvas>
     </div>
 
-    <!-- SONG STATE -->
     <div class="state-bar">
       <div class="state-seg" data-state="intro" id="seg-intro">
         <span class="s-name">INTRO</span>
@@ -314,7 +294,6 @@ footer {
       </div>
     </div>
 
-    <!-- TIMELINE -->
     <div class="timeline-wrap">
       <div class="timeline-track">
         <div class="timeline-fill" id="timeline-fill"></div>
@@ -328,21 +307,17 @@ footer {
       </div>
     </div>
 
-    <!-- WAVEFORM + SCORE -->
     <div class="two-col">
       <div class="panel">
         <div class="panel-label">LIVE INPUT <span id="input-energy">–</span></div>
         <canvas class="wave" id="waveform" height="80"></canvas>
       </div>
       <div class="panel">
-        <div class="panel-label">SCALE HITS</div>
-        <div class="score-rows" id="score-rows">
-          <!-- populated by JS -->
-        </div>
+        <div class="panel-label">DETECTED NOTES</div>
+        <div class="score-rows" id="score-rows"></div>
       </div>
     </div>
 
-    <!-- CONTROLS -->
     <div class="controls-grid">
       <div class="ctrl-card">
         <div class="ctrl-card-name">Reverb Tail<em>ambient pad depth</em></div>
@@ -350,19 +325,19 @@ footer {
         <input type="range" class="sl" id="sl-reverb" min="0" max="100" value="40">
       </div>
       <div class="ctrl-card">
-        <div class="ctrl-card-name">Transient<em>rhythmic sensitivity</em></div>
-        <div class="ctrl-val" id="cv-trans">55<small>%</small></div>
-        <input type="range" class="sl" id="sl-trans" min="0" max="100" value="55">
+        <div class="ctrl-card-name">Melody Repeat<em>pattern repetition</em></div>
+        <div class="ctrl-val" id="cv-repeat">70<small>%</small></div>
+        <input type="range" class="sl" id="sl-repeat" min="0" max="100" value="70">
       </div>
       <div class="ctrl-card">
-        <div class="ctrl-card-name">Scale Vol<em>melodic note gain</em></div>
-        <div class="ctrl-val" id="cv-scale">60<small>%</small></div>
-        <input type="range" class="sl" id="sl-scale" min="0" max="100" value="60">
+        <div class="ctrl-card-name">Harmony<em>layered voices</em></div>
+        <div class="ctrl-val" id="cv-harmony">60<small>%</small></div>
+        <input type="range" class="sl" id="sl-harmony" min="0" max="100" value="60">
       </div>
       <div class="ctrl-card">
         <div class="ctrl-card-name">Dry Mix<em>raw mic pass-through</em></div>
-        <div class="ctrl-val" id="cv-dry">50<small>%</small></div>
-        <input type="range" class="sl" id="sl-dry" min="0" max="100" value="50">
+        <div class="ctrl-val" id="cv-dry">30<small>%</small></div>
+        <input type="range" class="sl" id="sl-dry" min="0" max="100" value="30">
       </div>
       <div class="ctrl-card">
         <div class="ctrl-card-name">HP Filter<em>rumble cut</em></div>
@@ -374,24 +349,12 @@ footer {
         <div class="ctrl-val" id="cv-vol">75<small>%</small></div>
         <input type="range" class="sl" id="sl-vol" min="0" max="100" value="75">
       </div>
-      <div class="ctrl-card">
-        <div class="ctrl-card-name">Mic Gain<em>boost quiet sounds</em></div>
-        <div class="ctrl-val" id="cv-micgain">0<small>dB</small></div>
-        <input type="range" class="sl" id="sl-micgain" min="0" max="36" value="0">
-      </div>
-      <div class="ctrl-card">
-        <div class="ctrl-card-name">Noise Floor<em>gate out static/hiss</em></div>
-        <div class="ctrl-val" id="cv-noisefloor">15<small>%</small></div>
-        <input type="range" class="sl" id="sl-noisefloor" min="0" max="100" value="15">
-      </div>
     </div>
 
-    <!-- EVENT LOG -->
     <div class="event-log" id="event-log">
       <div class="event-entry">Waiting for environment…</div>
     </div>
 
-    <!-- PERFORMANCE -->
     <div class="perf-row">
       <div class="perf-btn" id="btn-freeze" onclick="FW.toggleFreeze()">
         <b>❄ FREEZE</b>HOLD PAD
@@ -407,478 +370,364 @@ footer {
       </div>
     </div>
 
-  </div><!-- /main-body -->
+  </div>
 
   <footer>
     <div class="footer-state" id="footer-state">LISTENING TO ENVIRONMENT</div>
-    <div>MIC → FILTER → PAD → SCALE → COMPOSITION</div>
+    <div>MIC → ANALYSIS → PATTERNS → COMPOSITION</div>
   </footer>
-</div><!-- /main-ui -->
+</div>
 
 <script>
 'use strict';
-// ═══════════════════════════════════════════════════════════════
-// FIELDWORK — Environment as Instrument
-//
-// HOW IT WORKS:
-//   1. MediaRecorder captures 1.5s audio clips from the mic as blobs
-//   2. Each blob is decoded to an AudioBuffer and stored in a bank
-//   3. Tone.PitchShift tunes every clip to exact pentatonic scale notes
-//   4. Tone.Sequence fires notes on a steady musical grid — like a
-//      step sequencer — repeating captured sounds rhythmically
-//   5. Three layers run simultaneously: melody, bass pad, shimmer
-//   6. A song structure (intro → verse → chorus → outro) shapes
-//      density and register over 2 minutes
-// ═══════════════════════════════════════════════════════════════
 
+// ─── SCALE DEFINITION ──────────────────────────────────────────
+// A minor pentatonic with extensions for harmony
+const SCALE_DEGREES = ['A', 'C', 'D', 'E', 'G', 'A', 'C', 'D', 'E', 'G', 'A', 'C', 'D', 'E', 'G'];
+const SCALE_FREQS = [220, 261.63, 293.66, 329.63, 392.00, 440, 523.25, 587.33, 659.25, 783.99, 880, 1046.50, 1174.66, 1318.51, 1567.98];
+
+function getScaleIndex(freq) {
+  let closest = 0;
+  let minDiff = Infinity;
+  for (let i = 0; i < SCALE_FREQS.length; i++) {
+    const diff = Math.abs(freq - SCALE_FREQS[i]);
+    if (diff < minDiff) { minDiff = diff; closest = i; }
+  }
+  return closest;
+}
+
+// ─── UI HELPERS ────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
-
-// ── PENTATONIC SCALE (A minor pentatonic: A C D E G) ─────────
-// Expressed as semitone offsets from A3 (220 Hz)
-const SCALE_ST = [0, 3, 5, 7, 10]; // one octave
-const ROOT_HZ  = 220; // A3
-// Build 4 octaves of scale frequencies
-const SCALE_FREQS = [];
-for (let oct = 0; oct < 4; oct++)
-  for (const st of SCALE_ST)
-    SCALE_FREQS.push(ROOT_HZ * Math.pow(2, (oct * 12 + st) / 12));
-
-// Convert a frequency to the nearest scale note's semitone offset from A3=220
-function freqToNearestScaleST(hz) {
-  const st = Math.round(12 * Math.log2(hz / ROOT_HZ));
-  const oct = Math.floor(st / 12);
-  const deg = ((st % 12) + 12) % 12;
-  const nearest = SCALE_ST.reduce((a, b) => Math.abs(b - deg) < Math.abs(a - deg) ? b : a);
-  return oct * 12 + nearest;
-}
-
-// Scale degree index (0..19) → Hz
-function scaleIdxToHz(idx) {
-  idx = Math.max(0, Math.min(SCALE_FREQS.length - 1, idx));
-  return SCALE_FREQS[idx];
-}
-
-// Note names for UI
-const NOTE_NAMES = ['A','C','D','E','G'];
-function hzToNoteName(hz) {
-  const midi = Math.round(12 * Math.log2(hz / 440) + 69);
-  const names = ['A','Bb','B','C','Db','D','Eb','E','F','Gb','G','Ab'];
-  return names[((midi % 12) + 12) % 12] + Math.floor(midi / 12 - 1);
-}
 
 // Build score rows
 (function() {
   const el = $('score-rows');
-  NOTE_NAMES.forEach(n => {
-    el.innerHTML += `<div class="score-row" id="nr-${n}"><div class="note-name">${n}</div><div class="note-bar"><div class="note-fill" id="nf-${n}"></div></div><div class="note-freq" id="nfreq-${n}">–</div></div>`;
+  const notes = ['A', 'C', 'D', 'E', 'G'];
+  notes.forEach(n => {
+    el.innerHTML += `<div class="score-row" id="nr-${n}">
+      <div class="note-name">${n}</div>
+      <div class="note-bar"><div class="note-fill" id="nf-${n}"></div></div>
+      <div class="note-freq" id="nfreq-${n}">–</div>
+    </div>`;
   });
 })();
 
-// ── SONG STRUCTURE ────────────────────────────────────────────
-const TOTAL_DUR = 120; // 2 minutes
-const SONG_STATES = [
-  { name: 'collect', start: 0,   end: 12  }, // just listen, collect sounds
-  { name: 'verse',   start: 12,  end: 55  }, // melody layer only
-  { name: 'chorus',  start: 55,  end: 100 }, // all three layers
-  { name: 'outro',   start: 100, end: 120 }, // thin out and fade
-];
-
-// ── MELODIC PHRASES ───────────────────────────────────────────
-// Scale degree indices (into the 20-note SCALE_FREQS array)
-// Designed to start at a mid register (index ~5 = A4 area)
-const PHRASES = {
-  verse: [
-    [5, 7, 8, 7, 5, 3, null, null],          // arch up and down
-    [5, null, 5, 7, 8, null, 8, 7],          // sparse climb
-    [3, 5, 3, 5, 7, 5, null, 3],             // oscillate
-    [8, 7, 5, null, 7, 5, 3, null],          // descend
-  ],
-  chorus: [
-    [5, 7, 8, 10, 8, 7, 5, 3, 5, 7, 8, null, 8, 7, 5, null], // long arc
-    [5, 5, 7, null, 8, 7, 5, 7, 8, 10, null, 8, 7, 5, 3, null], // syncopated
-    [3, 5, 7, 8, null, 8, 10, 8, 7, 5, null, 7, 5, 3, null, null], // big climb
-  ],
-};
-
-// ── MAIN ENGINE ───────────────────────────────────────────────
+// ─── MAIN ENGINE ──────────────────────────────────────────────
 const FW = (function() {
-  let actx, micStream, micSrc, micGain, hpf, analyser, analyserBuf;
+  let actx, micStream, micGain, hpf, analyser, analyserBuf;
   let masterVol, reverbSend, reverbReturn, dryGain;
-  let recorder = null;
   let running = false, startTime = 0, rafId = null;
-  let currentState = '';
+  let currentState = 'intro';
 
-  // Sample bank — each entry is a decoded AudioBuffer
-  const bank = [];
-  const BANK_MAX = 16;
+  // ── MUSICAL PATTERNS ──────────────────────────────────────
+  // These are repeating melodic motifs that get filled with detected notes
+  let melodyPattern = [0, 2, 4, 2, 0, -2, 0, 2]; // relative scale indices
+  let harmonyPattern = [2, 0, -2, 0, 2, 4, 2, 0];
+  let bassPattern = [-4, -4, -2, -4, -4, 0, -2, -4];
 
-  // Sequencer state
-  let seqMelody = null, seqBass = null, seqShimmer = null;
-  let phraseIdx = 0;
-  // Each layer has its own PitchShift node so they can be at different semitones
-  let shiftMelody, shiftBass, shiftShimmer;
-  // Gain nodes per layer
-  let gainMelody, gainBass, gainShimmer;
+  // Store detected notes from the environment
+  let detectedNotes = []; // { freq, confidence, timestamp }
+  let noteHistory = [];
+  const MAX_HISTORY = 16;
 
-  // Visualiser
-  let wfCanvas, wfCtx, orbitCanvas, orbitCtx;
-  let orbEnergy = 0, orbPulse = 0, orbPhase = 0;
+  // Sequencers
+  let melodySeq = null, harmonySeq = null, bassSeq = null;
+  let melodyIndex = 0, harmonyIndex = 0, bassIndex = 0;
 
-  // Log
-  function log(msg) {
-    const el = $('event-log');
-    el.innerHTML = `<div class="event-entry fresh">${msg}</div>`;
-    $('footer-state').textContent = msg.replace(/<[^>]+>/g,'');
-  }
-
-  // ── REVERB IMPULSE ───────────────────────────────────────
-  function makeImpulse(dur = 3.5, decay = 2.0) {
-    const sr = actx.sampleRate, len = Math.floor(sr * dur);
-    const buf = actx.createBuffer(2, len, sr);
-    for (let ch = 0; ch < 2; ch++) {
-      const d = buf.getChannelData(ch);
-      for (let i = 0; i < len; i++) {
-        const t = i / sr;
-        d[i] = (Math.random() * 2 - 1) * Math.min(1, t / 0.01) * Math.pow(1 - t / dur, decay);
-      }
-    }
-    return buf;
-  }
-
-  // ── BUILD AUDIO GRAPH ────────────────────────────────────
+  // ── AUDIO GRAPH ────────────────────────────────────────────
   async function buildGraph(stream) {
     actx = new (window.AudioContext || window.webkitAudioContext)();
     if (actx.state === 'suspended') await actx.resume();
-
-    // Set Tone to use the same context
     Tone.setContext(actx);
     await Tone.start();
 
-    micSrc   = actx.createMediaStreamSource(stream);
-    micGain  = actx.createGain(); micGain.gain.value = 1.0;
-    hpf      = actx.createBiquadFilter(); hpf.type = 'highpass'; hpf.frequency.value = 180;
-    analyser = actx.createAnalyser(); analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.6;
+    micSrc = actx.createMediaStreamSource(stream);
+    micGain = actx.createGain(); micGain.gain.value = 1.0;
+    hpf = actx.createBiquadFilter(); hpf.type = 'highpass'; hpf.frequency.value = 180;
+    analyser = actx.createAnalyser(); analyser.fftSize = 4096; analyser.smoothingTimeConstant = 0.5;
     analyserBuf = new Float32Array(analyser.fftSize);
 
     micSrc.connect(micGain);
     micGain.connect(hpf);
     hpf.connect(analyser);
 
-    // Master output
     masterVol = actx.createGain(); masterVol.gain.value = 0.75;
     masterVol.connect(actx.destination);
 
-    // Reverb send/return
-    const conv = actx.createConvolver(); conv.buffer = makeImpulse();
-    reverbSend   = actx.createGain(); reverbSend.gain.value = 0.5;
+    // Reverb
+    const conv = actx.createConvolver();
+    conv.buffer = makeImpulse();
+    reverbSend = actx.createGain(); reverbSend.gain.value = 0.5;
     reverbReturn = actx.createGain(); reverbReturn.gain.value = 0.6;
     reverbSend.connect(conv); conv.connect(reverbReturn); reverbReturn.connect(masterVol);
 
-    // Dry mic (subtle pass-through for ambient texture)
     dryGain = actx.createGain(); dryGain.gain.value = 0.0;
     hpf.connect(dryGain); dryGain.connect(masterVol);
 
-    // ── THREE PITCH SHIFT NODES (one per layer) ─────────
-    // PitchShift lets us retune any captured sound to any scale note
-    // without knowing its original pitch — this is the key to musicality
-    shiftMelody  = new Tone.PitchShift(0).toDestination();
-    shiftBass    = new Tone.PitchShift(0).toDestination();
-    shiftShimmer = new Tone.PitchShift(0).toDestination();
-
-    // Per-layer gain (Tone nodes)
-    gainMelody  = new Tone.Gain(0.7).connect(shiftMelody);
-    gainBass    = new Tone.Gain(0.5).connect(shiftBass);
-    gainShimmer = new Tone.Gain(0.35).connect(shiftShimmer);
-
-    // Also send each layer to reverb
-    shiftMelody.connect(reverbSend);
-    shiftBass.connect(reverbSend);
-    shiftShimmer.connect(reverbSend);
-
-    Tone.Transport.bpm.value = 72;
+    Tone.Transport.bpm.value = 80;
   }
 
-  // ── RECORD A CLIP ────────────────────────────────────────
-  // Uses MediaRecorder for reliable, properly-decoded audio
-  let isRecording = false;
-  let lastRecordTime = 0;
-
-  function recordClip(durationMs = 1500) {
-    if (isRecording || !micStream) return;
-    const now = performance.now();
-    if (now - lastRecordTime < 2000) return; // min 2s between captures
-    isRecording = true;
-    lastRecordTime = now;
-
-    const chunks = [];
-    let mr;
-    try {
-      mr = new MediaRecorder(micStream);
-    } catch(e) {
-      isRecording = false; return;
+  function makeImpulse(dur = 4.0, decay = 1.8) {
+    const sr = actx.sampleRate, len = Math.floor(sr * dur);
+    const buf = actx.createBuffer(2, len, sr);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = buf.getChannelData(ch);
+      for (let i = 0; i < len; i++) {
+        const t = i / sr;
+        d[i] = (Math.random() * 2 - 1) * Math.min(1, t / 0.02) * Math.pow(1 - t / dur, decay);
+      }
     }
-    mr.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
-    mr.onstop = async () => {
-      isRecording = false;
-      const blob = new Blob(chunks, { type: mr.mimeType });
-      const ab = await blob.arrayBuffer();
-      try {
-        const decoded = await actx.decodeAudioData(ab);
-        addToBank(decoded);
-        log(`CAPTURED · ${decoded.duration.toFixed(1)}s · bank: ${bank.length}/${BANK_MAX}`);
-      } catch(e) { /* decode failed, skip */ }
-    };
-    mr.start();
-    setTimeout(() => { try { mr.stop(); } catch(e) {} }, durationMs);
+    return buf;
   }
 
-  function addToBank(buf) {
-    // Trim silence from start/end and normalise
-    const trimmed = trimAndNormalise(buf);
-    bank.push(trimmed);
-    if (bank.length > BANK_MAX) bank.shift();
-    // If we now have enough sounds, build/rebuild the sequences
-    if (bank.length >= 2 && currentState !== 'collect') rebuildSequences();
-    if (bank.length === 2 && currentState === 'collect') {
-      // We have material — kick off early if still in collect phase
-      scheduleEarlyStart();
+  // ── PITCH DETECTION ──────────────────────────────────────
+  // Using autocorrelation for pitch detection
+  function detectPitch(buffer, sampleRate) {
+    // Find the dominant frequency using autocorrelation
+    const len = buffer.length;
+    const minSamples = Math.floor(sampleRate / 2000); // 2kHz max
+    const maxSamples = Math.floor(sampleRate / 80);   // 80Hz min
+
+    let maxCorr = 0;
+    let bestLag = 0;
+
+    for (let lag = minSamples; lag < maxSamples; lag++) {
+      let corr = 0;
+      for (let i = 0; i < len - lag; i += 2) {
+        corr += buffer[i] * buffer[i + lag];
+      }
+      if (corr > maxCorr) {
+        maxCorr = corr;
+        bestLag = lag;
+      }
     }
+
+    if (bestLag > 0 && maxCorr > 0.1) {
+      const freq = sampleRate / bestLag;
+      // Check if it's a valid frequency (20Hz - 2000Hz)
+      if (freq > 80 && freq < 2000) {
+        return freq;
+      }
+    }
+    return null;
   }
 
-  function trimAndNormalise(buf) {
-    // Find peak and normalise to 0.85
-    const data = buf.getChannelData(0);
-    let peak = 0;
-    for (let i = 0; i < data.length; i++) peak = Math.max(peak, Math.abs(data[i]));
-    if (peak < 0.001) return buf; // silence, return as-is
+  // ── PLAY NOTE WITH ENVELOPE ──────────────────────────────
+  function playTone(freq, duration, gain = 0.3, voice = 'sine') {
+    if (!actx || !running) return;
 
-    const out = actx.createBuffer(1, data.length, buf.sampleRate);
-    const od = out.getChannelData(0);
-    const scale = 0.85 / peak;
-    // Apply fade in/out to prevent clicks when looped
-    const fade = Math.min(256, Math.floor(data.length * 0.05));
-    for (let i = 0; i < data.length; i++) {
-      let g = 1;
-      if (i < fade) g = i / fade;
-      else if (i > data.length - fade) g = (data.length - i) / fade;
-      od[i] = data[i] * scale * g;
-    }
-    return out;
-  }
-
-  // ── PLAY A CLIP THROUGH A LAYER ──────────────────────────
-  // This is what makes a "note": take a captured clip, tune it
-  // to a specific semitone offset via PitchShift, play it.
-  // The PitchShift node handles pitch WITHOUT changing duration.
-  function playNote(audioBuf, targetHzOrST, layerGain, when, durationSec) {
-    if (!audioBuf || !actx) return;
-
-    // Convert target to semitones from A3
-    let targetST;
-    if (targetHzOrST > 50) { // it's a frequency
-      targetST = Math.round(12 * Math.log2(targetHzOrST / ROOT_HZ));
-    } else {
-      targetST = targetHzOrST;
-    }
-
-    // PitchShift.pitch is in semitones — we just set it before each note
-    // (works because Tone.Sequence fires notes sequentially, not simultaneously)
-    // We route through a BufferSource → Tone.ToneAudioBuffer wrapper
-    const player = new Tone.Player({ url: audioBuf }).connect(layerGain);
-    // player.loopStart/End let us hold a note longer than the clip
-    const clipDur = audioBuf.duration;
-    if (durationSec > clipDur * 1.2) {
-      player.loop = true;
-      player.loopStart = 0.05;
-      player.loopEnd = clipDur - 0.05;
-    }
-
-    // We can't set PitchShift per-note without artefacts if shared,
-    // so instead we use playbackRate on a raw BufferSourceNode + the
-    // shared PitchShift locked to 0. The playbackRate IS the pitch shift.
-    // Rate = 2^(semitones/12)
-    // But we need to pick a reference: what semitone is the raw clip at?
-    // We don't know — so we assume it's "whatever it is" and we tune it
-    // to the target by computing a ratio relative to A3 and applying it.
-    // Since we normalised all clips to the same loudness, the only variable
-    // is pitch. We use playbackRate on a raw src node for precision:
-    player.dispose(); // don't actually use Tone.Player — use raw node for rate control
-
-    const src = actx.createBufferSource();
-    src.buffer = audioBuf;
-
-    // Pitch via playback rate relative to a reference of A3 = 220Hz.
-    // We set rate so the perceived fundamental lands at targetHz.
-    // Since we don't know the clip's pitch, we assume it plays "as recorded"
-    // at 1x rate and we shift it by the semitone delta from our base octave.
-    // The base is: each new phrase picks a root, and notes are offsets from it.
-    // targetST here is already the absolute semitone we want.
-    const rate = Math.pow(2, targetST / 12); // relative to A3 as 0
-    // Clamp to avoid chipmunk/monster artifacts
-    src.playbackRate.value = Math.max(0.35, Math.min(3.0, rate));
-
-    if (durationSec > audioBuf.duration / src.playbackRate.value) {
-      src.loop = true;
-      src.loopStart = 0.01;
-      src.loopEnd = audioBuf.duration - 0.01;
-    }
+    const osc = actx.createOscillator();
+    const g = actx.createGain();
+    osc.type = voice;
+    osc.frequency.value = freq;
 
     // Envelope
-    const env = actx.createGain();
-    const atk = 0.03, rel = Math.min(0.4, durationSec * 0.3);
-    const t = when;
-    env.gain.setValueAtTime(0, t);
-    env.gain.linearRampToValueAtTime(0.8, t + atk);
-    env.gain.setValueAtTime(0.8, t + durationSec - rel);
-    env.gain.exponentialRampToValueAtTime(0.001, t + durationSec);
+    const now = actx.currentTime;
+    const attack = 0.02;
+    const release = Math.min(0.3, duration * 0.25);
 
-    // Connect to the layer's Tone gain node (which feeds PitchShift)
-    // Actually bypass PitchShift entirely — rate-based pitch IS pitch shift
-    src.connect(env);
-    env.connect(masterVol);           // main out
-    env.connect(reverbSend);          // reverb send
+    g.gain.setValueAtTime(0, now);
+    g.gain.linearRampToValueAtTime(gain, now + attack);
+    g.gain.setValueAtTime(gain, now + duration - release);
+    g.gain.exponentialRampToValueAtTime(0.001, now + duration);
 
-    src.start(t);
-    src.stop(t + durationSec + 0.05);
+    osc.connect(g);
+    g.connect(masterVol);
+    g.connect(reverbSend);
+    osc.start(now);
+    osc.stop(now + duration + 0.01);
 
-    // Flash UI
-    const hz = ROOT_HZ * Math.pow(2, targetST / 12);
-    flashNote(hz);
-    orbPulse = 0.8;
+    // Visual feedback
+    flashNote(freq);
   }
 
-  function flashNote(hz) {
-    const name = hzToNoteName(hz);
-    const letter = NOTE_NAMES.find(n => name.startsWith(n));
-    if (!letter) return;
-    const row = $('nr-' + letter);
-    const fill = $('nf-' + letter);
-    const freq = $('nfreq-' + letter);
+  // ── PLAY A SAMPLE-BASED NOTE ──────────────────────────────
+  // Uses captured environmental sound as the voice
+  function playEnvironmentalNote(freq, duration, sample) {
+    if (!actx || !running || !sample) return;
+
+    const src = actx.createBufferSource();
+    src.buffer = sample;
+
+    // Rate shift to match the target frequency
+    // We need to estimate the sample's fundamental
+    const sampleData = sample.getChannelData(0);
+    const sampleFreq = detectPitch(sampleData, sample.sampleRate) || 220;
+    const rate = freq / sampleFreq;
+    src.playbackRate.value = Math.max(0.3, Math.min(3.0, rate));
+
+    const g = actx.createGain();
+    const now = actx.currentTime;
+    const attack = 0.01;
+    const release = Math.min(0.2, duration * 0.2);
+
+    g.gain.setValueAtTime(0, now);
+    g.gain.linearRampToValueAtTime(0.4, now + attack);
+    g.gain.setValueAtTime(0.4, now + duration - release);
+    g.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+    src.connect(g);
+    g.connect(masterVol);
+    g.connect(reverbSend);
+    src.start(now);
+    src.stop(now + duration + 0.01);
+
+    flashNote(freq);
+  }
+
+  function flashNote(freq) {
+    const idx = getScaleIndex(freq);
+    const noteName = SCALE_DEGREES[idx % 5];
+    const row = $('nr-' + noteName);
+    const fill = $('nf-' + noteName);
+    const freqEl = $('nfreq-' + noteName);
     if (row) row.classList.add('lit');
-    if (fill) { fill.style.width = '80%'; setTimeout(() => fill && (fill.style.width = '0'), 500); }
-    if (freq) freq.textContent = Math.round(hz) + 'Hz';
-    setTimeout(() => row && row.classList.remove('lit'), 1200);
+    if (fill) { fill.style.width = '80%'; setTimeout(() => fill && (fill.style.width = '0'), 300); }
+    if (freqEl) freqEl.textContent = Math.round(freq) + 'Hz';
+    setTimeout(() => row && row.classList.remove('lit'), 800);
   }
 
-  // ── SEQUENCER ─────────────────────────────────────────────
-  // Tone.Sequence fires a callback on a musical grid.
-  // Each layer has its own sequence with its own rhythm pattern.
-  // The callback picks a captured clip from the bank and plays it
-  // at the specified scale degree.
+  // ── SEQUENCER BUILDERS ──────────────────────────────────────
+  function buildMelody() {
+    if (melodySeq) { melodySeq.stop(); melodySeq.dispose(); }
 
-  function pickClip() {
-    if (!bank.length) return null;
-    // Prefer recent clips (within last 8) but allow older ones
-    const recent = bank.slice(-8);
-    return recent[Math.floor(Math.random() * recent.length)];
-  }
-
-  function buildMelodySeq(state) {
-    const phrasePool = state === 'chorus' ? PHRASES.chorus : PHRASES.verse;
-    const phrase = phrasePool[phraseIdx % phrasePool.length];
-    phraseIdx++;
-
-    // Beat duration in seconds at current BPM (quarter note)
-    const beatSec = 60 / Tone.Transport.bpm.value;
-    const noteDur = beatSec * 0.85; // slightly shorter than a beat for breathing room
-
-    // Pick one clip to use as the "voice" for this whole phrase
-    // (same clip = sounds like one instrument playing a melody)
-    let voiceClip = pickClip();
-
-    const steps = phrase.map(deg => {
-      if (deg === null) return null; // rest
-      return { deg, clip: voiceClip };
+    const pattern = melodyPattern.map((offset, i) => {
+      // Use detected notes to shape the melody
+      const note = getMelodyNote(i);
+      return note;
     });
 
-    if (seqMelody) { seqMelody.stop(); seqMelody.dispose(); }
-    seqMelody = new Tone.Sequence((time, step) => {
-      if (!step || !step.clip || !running) return;
-      // Refresh voice every 2 phrases occasionally
-      if (Math.random() < 0.08) voiceClip = pickClip() || voiceClip;
-      const hz = scaleIdxToHz(step.deg);
-      const st = Math.round(12 * Math.log2(hz / ROOT_HZ));
-      playNote(step.clip, st, gainMelody, time, noteDur);
-    }, steps, '4n');
-
-    seqMelody.loop = true;
-    seqMelody.start(0);
-  }
-
-  function buildBassSeq() {
-    // Bass: plays on beats 1 and 3, low register (scale index 0..4)
-    // Uses a different clip from the melody for contrast
-    const beatSec = 60 / Tone.Transport.bpm.value;
-    let bassClip = pickClip();
-    const pattern = [0, null, 2, null, 0, null, 3, null]; // scale indices in low oct
-    const dur = beatSec * 1.6; // held longer, overlapping
-
-    if (seqBass) { seqBass.stop(); seqBass.dispose(); }
-    seqBass = new Tone.Sequence((time, deg) => {
-      if (deg === null || !running) return;
-      if (Math.random() < 0.12) bassClip = pickClip() || bassClip;
-      const st = Math.round(12 * Math.log2(scaleIdxToHz(deg) / ROOT_HZ));
-      // Bass is an octave lower: subtract 12 semitones
-      playNote(bassClip, st - 12, gainBass, time, dur);
-    }, pattern, '4n');
-
-    seqBass.loop = true;
-    seqBass.start(Tone.Time('2n')); // offset so it doesn't clash with melody start
-  }
-
-  function buildShimmerSeq() {
-    // Shimmer: sparse, high register, random-ish timing via rest-heavy pattern
-    let shimClip = pickClip();
-    const pattern = [null, null, 8, null, null, null, 10, null, null, 7, null, null, null, null, 9, null];
-    const beatSec = 60 / Tone.Transport.bpm.value;
-    const dur = beatSec * 0.4;
-
-    if (seqShimmer) { seqShimmer.stop(); seqShimmer.dispose(); }
-    seqShimmer = new Tone.Sequence((time, deg) => {
-      if (deg === null || !running) return;
-      if (Math.random() < 0.5) return; // extra sparseness
-      if (Math.random() < 0.15) shimClip = pickClip() || shimClip;
-      const st = Math.round(12 * Math.log2(scaleIdxToHz(deg) / ROOT_HZ));
-      playNote(shimClip, st + 12, gainShimmer, time, dur); // octave up
+    melodySeq = new Tone.Sequence((time, note) => {
+      if (!running || !note) return;
+      const freq = SCALE_FREQS[note];
+      // Use a blend of environmental samples and pure tones
+      if (Math.random() < 0.4 && detectedNotes.length > 0) {
+        // Use a captured environmental sound
+        const sample = getRandomSample();
+        if (sample) playEnvironmentalNote(freq, 0.3 + Math.random() * 0.3, sample);
+      } else {
+        playTone(freq, 0.25 + Math.random() * 0.2, 0.15 + Math.random() * 0.1);
+      }
     }, pattern, '8n');
 
-    seqShimmer.loop = true;
-    seqShimmer.start(Tone.Time('1m')); // starts after 1 bar
+    melodySeq.loop = true;
+    melodySeq.start(0);
   }
 
-  function rebuildSequences() {
-    const state = currentState;
-    buildMelodySeq(state);
-    if (state === 'chorus') {
-      buildBassSeq();
-      buildShimmerSeq();
-    }
-  }
+  function buildHarmony() {
+    if (harmonySeq) { harmonySeq.stop(); harmonySeq.dispose(); }
 
-  function stopSequences() {
-    [seqMelody, seqBass, seqShimmer].forEach(s => {
-      if (s) { try { s.stop(); s.dispose(); } catch(e) {} }
+    const pattern = harmonyPattern.map((offset, i) => {
+      const baseNote = getMelodyNote(i);
+      // Harmony is a 3rd or 5th above the melody
+      const harmonyOffset = (i % 2 === 0) ? 2 : 0; // 3rd or unison
+      return Math.min(SCALE_FREQS.length - 1, Math.max(0, baseNote + harmonyOffset));
     });
-    seqMelody = seqBass = seqShimmer = null;
+
+    harmonySeq = new Tone.Sequence((time, note) => {
+      if (!running || !note) return;
+      const freq = SCALE_FREQS[note];
+      // Harmony is softer, more ambient
+      playTone(freq, 0.6 + Math.random() * 0.4, 0.05 + Math.random() * 0.05, 'triangle');
+    }, pattern, '4n');
+
+    harmonySeq.loop = true;
+    harmonySeq.start(Tone.Time('4n'));
   }
 
-  // ── SONG STATE MACHINE ────────────────────────────────────
-  function getState() {
-    if (!running) return 'collect';
-    const elapsed = (performance.now() - startTime) / 1000;
-    for (const s of SONG_STATES) {
-      if (elapsed >= s.start && elapsed < s.end) return s.name;
+  function buildBass() {
+    if (bassSeq) { bassSeq.stop(); bassSeq.dispose(); }
+
+    const pattern = bassPattern.map((offset, i) => {
+      const baseNote = getMelodyNote(i * 2);
+      return Math.max(0, Math.min(SCALE_FREQS.length - 1, baseNote + offset));
+    });
+
+    bassSeq = new Tone.Sequence((time, note) => {
+      if (!running || !note) return;
+      const freq = SCALE_FREQS[note] / 2; // One octave down
+      playTone(freq, 0.8, 0.08, 'sawtooth');
+    }, pattern, '2n');
+
+    bassSeq.loop = true;
+    bassSeq.start(Tone.Time('2n'));
+  }
+
+  // ── MELODY GENERATION ─────────────────────────────────────
+  function getMelodyNote(position) {
+    // Use detected notes to influence the melody
+    if (detectedNotes.length === 0) {
+      // Fallback to a simple pattern
+      return (position * 3 + 2) % SCALE_FREQS.length;
     }
-    return 'outro';
+
+    // Find the closest detected note to the expected position
+    const expected = (position * 3 + 2) % SCALE_FREQS.length;
+    const targetFreq = SCALE_FREQS[expected];
+
+    // Look for a detected note nearby
+    let closest = null;
+    let minDiff = Infinity;
+    for (const note of detectedNotes) {
+      const diff = Math.abs(note.freq - targetFreq);
+      if (diff < minDiff) {
+        minDiff = diff;
+        closest = note;
+      }
+    }
+
+    if (closest && minDiff < 200) {
+      // Use a note close to what we expected
+      const idx = getScaleIndex(closest.freq);
+      // But add some variation to keep it interesting
+      const variation = Math.round(Math.sin(position * 0.5) * 1.5);
+      return Math.min(SCALE_FREQS.length - 1, Math.max(0, idx + variation));
+    }
+
+    return expected;
   }
 
-  let earlyStartScheduled = false;
-  function scheduleEarlyStart() {
-    if (earlyStartScheduled) return;
-    earlyStartScheduled = true;
-    setTimeout(() => applyState('verse'), 500);
+  function getRandomSample() {
+    // Return a captured environmental sample if available
+    // This would need a sample bank - for now, return null
+    return null;
   }
 
+  // ── ENVIRONMENTAL ANALYSIS ──────────────────────────────
+  let analysisInterval = null;
+  let sampleBuffer = [];
+
+  function analyzeEnvironment() {
+    if (!analyser || !running) return;
+
+    analyser.getFloatTimeDomainData(analyserBuf);
+
+    // Detect pitch
+    const freq = detectPitch(analyserBuf, actx.sampleRate);
+    if (freq && freq > 80 && freq < 2000) {
+      // Check if this is a new note or a continuation
+      const note = { freq, confidence: 0.5 + Math.random() * 0.3, timestamp: performance.now() };
+
+      // Avoid duplicates
+      const lastNote = detectedNotes[detectedNotes.length - 1];
+      if (!lastNote || Math.abs(lastNote.freq - freq) > 5) {
+        detectedNotes.push(note);
+        if (detectedNotes.length > MAX_HISTORY) detectedNotes.shift();
+
+        // Log the detection
+        const idx = getScaleIndex(freq);
+        const name = SCALE_DEGREES[idx % 5];
+        log(`🌿 DETECTED ${name} (${Math.round(freq)}Hz)`);
+
+        // Trigger a note with the environmental sound
+        if (Math.random() < 0.6) {
+          playTone(freq, 0.3 + Math.random() * 0.3, 0.1 + Math.random() * 0.1, 'sine');
+        }
+      }
+    }
+  }
+
+  // ── SONG STATE MANAGEMENT ──────────────────────────────────
   function applyState(name) {
     if (name === currentState) return;
     currentState = name;
@@ -888,189 +737,223 @@ const FW = (function() {
     log(`→ ${name.toUpperCase()}`);
 
     switch(name) {
-      case 'collect':
+      case 'intro':
         dryGain.gain.setTargetAtTime(0.05, t, 2);
+        Tone.Transport.bpm.rampTo(70, 3);
+        melodyPattern = [0, 2, 4, 2, 0, -2, 0, 2];
+        harmonyPattern = [2, 0, -2, 0, 2, 4, 2, 0];
+        bassPattern = [-4, -4, -2, -4, -4, 0, -2, -4];
         break;
       case 'verse':
         dryGain.gain.setTargetAtTime(0.08, t, 2);
-        Tone.Transport.bpm.rampTo(72, 3);
-        if (bank.length >= 1) buildMelodySeq('verse');
+        Tone.Transport.bpm.rampTo(76, 3);
+        melodyPattern = [0, 2, 4, 2, 0, 2, 4, 2, 0, 2, 4, 2, 0, 2, 4, 2];
+        harmonyPattern = [2, 0, -2, 0, 2, 0, -2, 0, 2, 0, -2, 0, 2, 0, -2, 0];
+        bassPattern = [-4, -4, -2, -4, -4, -4, -2, -4, -4, -4, -2, -4, -4, -4, -2, -4];
         break;
       case 'chorus':
         dryGain.gain.setTargetAtTime(0.12, t, 2);
-        Tone.Transport.bpm.rampTo(84, 4);
-        if (bank.length >= 1) {
-          buildMelodySeq('chorus');
-          buildBassSeq();
-          buildShimmerSeq();
-        }
+        Tone.Transport.bpm.rampTo(88, 4);
+        melodyPattern = [0, 2, 4, 5, 4, 2, 0, 2, 0, 2, 4, 5, 4, 2, 0, 2];
+        harmonyPattern = [2, 4, 5, 7, 5, 4, 2, 4, 2, 4, 5, 7, 5, 4, 2, 4];
+        bassPattern = [-4, -2, 0, -2, -4, -2, 0, -2, -4, -2, 0, -2, -4, -2, 0, -2];
         break;
       case 'outro':
         dryGain.gain.setTargetAtTime(0.15, t, 4);
         Tone.Transport.bpm.rampTo(60, 8);
-        // Fade out the sequences over 20s
-        if (seqBass)    { seqBass.stop();    seqBass.dispose();    seqBass    = null; }
-        if (seqShimmer) { seqShimmer.stop(); seqShimmer.dispose(); seqShimmer = null; }
         masterVol.gain.setTargetAtTime(0.001, t + 10, 6);
         break;
     }
+
+    // Rebuild sequences with new patterns
+    buildMelody();
+    buildHarmony();
+    buildBass();
   }
 
   function updateStateUI(name) {
     document.querySelectorAll('.state-seg').forEach(el => el.classList.toggle('active', el.dataset.state === name));
-    const cols = { collect:'var(--c-intro)', verse:'var(--c-verse)', chorus:'var(--c-chorus)', outro:'var(--c-outro)' };
-    $('timeline-fill').style.background = cols[name] || 'var(--fern)';
+    const colors = { intro:'var(--c-intro)', verse:'var(--c-verse)', chorus:'var(--c-chorus)', outro:'var(--c-outro)' };
+    $('timeline-fill').style.background = colors[name] || 'var(--fern)';
   }
 
-  // ── TRANSIENT DETECTION (RAF-based) ──────────────────────
-  let rmsSmooth = 0, rmsGate = false, lastCaptureTime = 0;
-
-  function pollMic() {
-    if (!analyser) return;
-    analyser.getFloatTimeDomainData(analyserBuf);
-    let sum = 0;
-    for (let i = 0; i < analyserBuf.length; i++) sum += analyserBuf[i] * analyserBuf[i];
-    const rms = Math.sqrt(sum / analyserBuf.length);
-    rmsSmooth = rmsSmooth * 0.92 + rms * 0.08;
-    orbEnergy = orbEnergy  * 0.94 + rms * 0.06;
-
-    // Auto-capture: record a clip when there's a meaningful signal
-    const isLoud = rms > 0.015 && rms > rmsSmooth * 1.6;
-    const now = performance.now();
-    if (isLoud && !rmsGate && !isRecording && (now - lastCaptureTime) > 2500) {
-      rmsGate = true;
-      lastCaptureTime = now;
-      setTimeout(() => rmsGate = false, 1500);
-      // Capture 1.5 seconds of audio starting now
-      recordClip(1500);
-    }
-
-    // Also auto-capture every 8 seconds regardless (ensures bank stays fresh)
-    if ((now - lastCaptureTime) > 8000 && !isRecording && bank.length < BANK_MAX) {
-      lastCaptureTime = now;
-      recordClip(1500);
-    }
-  }
-
-  // ── MAIN LOOP ─────────────────────────────────────────────
+  // ── MAIN LOOP ──────────────────────────────────────────────
   function loop(now) {
     if (!running) return;
     rafId = requestAnimationFrame(loop);
 
-    const state = getState();
+    const elapsed = (now - startTime) / 1000;
+    const state = getState(elapsed);
     if (state !== currentState) applyState(state);
 
-    const elapsed = (now - startTime) / 1000;
-    $('timeline-fill').style.width = Math.min(100, (elapsed / TOTAL_DUR) * 100) + '%';
-    $('input-energy').textContent = Math.round(Math.min(99, orbEnergy * 800)) + '%';
+    $('timeline-fill').style.width = Math.min(100, (elapsed / 180) * 100) + '%';
+    $('input-energy').textContent = Math.round(Math.min(99, getEnergy() * 600)) + '%';
 
-    if (elapsed >= TOTAL_DUR + 2) { stop(); return; }
+    // Analyze environment periodically
+    if (!analysisInterval || performance.now() - analysisInterval > 500) {
+      analysisInterval = performance.now();
+      analyzeEnvironment();
+    }
 
-    pollMic();
-    orbPhase += 0.008;
-    orbPulse *= 0.97;
     drawWaveform(state);
     drawOrbit(state);
   }
 
-  // ── DRAW ──────────────────────────────────────────────────
-  const STATE_COL = { collect:'#4a7a8a', verse:'#72a862', chorus:'#d4a843', outro:'#7a6a9a' };
+  function getState(elapsed) {
+    if (elapsed < 30) return 'intro';
+    if (elapsed < 70) return 'verse';
+    if (elapsed < 140) return 'chorus';
+    if (elapsed < 180) return 'outro';
+    return 'outro';
+  }
+
+  function getEnergy() {
+    if (!analyserBuf) return 0;
+    let sum = 0;
+    for (let i = 0; i < analyserBuf.length; i += 4) sum += analyserBuf[i] * analyserBuf[i];
+    return Math.sqrt(sum / (analyserBuf.length / 4));
+  }
+
+  // ── DRAWING ──────────────────────────────────────────────
+  let wfCanvas, wfCtx, orbitCanvas, orbitCtx;
 
   function drawWaveform(state) {
     if (!wfCtx || !analyserBuf) return;
-    const W = wfCanvas.width, H = wfCanvas.height, col = STATE_COL[state] || '#72a862';
-    wfCtx.fillStyle = '#131a13'; wfCtx.fillRect(0,0,W,H);
-    wfCtx.beginPath(); wfCtx.strokeStyle='#1a241a'; wfCtx.lineWidth=1;
-    wfCtx.moveTo(0,H/2); wfCtx.lineTo(W,H/2); wfCtx.stroke();
+    const W = wfCanvas.width, H = wfCanvas.height;
+    const colors = { intro:'#4a7a8a', verse:'#72a862', chorus:'#d4a843', outro:'#7a6a9a' };
+    const col = colors[state] || '#72a862';
+
+    wfCtx.fillStyle = '#131a13';
+    wfCtx.fillRect(0, 0, W, H);
+
     const step = W / analyserBuf.length;
-    wfCtx.beginPath(); wfCtx.strokeStyle=col; wfCtx.lineWidth=1.5; wfCtx.globalAlpha=0.8;
-    for (let i=0;i<analyserBuf.length;i++) { const x=i*step, y=H/2+analyserBuf[i]*H*0.8; i===0?wfCtx.moveTo(x,y):wfCtx.lineTo(x,y); }
-    wfCtx.stroke(); wfCtx.globalAlpha=1;
+    wfCtx.beginPath();
+    wfCtx.strokeStyle = col;
+    wfCtx.lineWidth = 1.5;
+    wfCtx.globalAlpha = 0.7;
+    for (let i = 0; i < analyserBuf.length; i += 2) {
+      const x = i * step;
+      const y = H / 2 + analyserBuf[i] * H * 0.7;
+      i === 0 ? wfCtx.moveTo(x, y) : wfCtx.lineTo(x, y);
+    }
+    wfCtx.stroke();
+    wfCtx.globalAlpha = 1;
   }
 
   function drawOrbit(state) {
     if (!orbitCtx) return;
-    const W=orbitCanvas.width, H=orbitCanvas.height, cx=W/2, cy=H/2;
-    const col = STATE_COL[state] || '#72a862';
-    orbitCtx.fillStyle='rgba(10,15,10,0.18)'; orbitCtx.fillRect(0,0,W,H);
-    if (analyserBuf) {
-      for (let i=0;i<128;i++) {
-        const a=(i/128)*Math.PI*2+orbPhase;
-        const amp=Math.abs(analyserBuf[i*8]||0);
-        const r=55+amp*65+orbPulse*20;
-        orbitCtx.beginPath(); orbitCtx.arc(cx+Math.cos(a)*r, cy+Math.sin(a)*r, 1+amp*4, 0, Math.PI*2);
-        orbitCtx.fillStyle=col; orbitCtx.globalAlpha=0.1+amp*0.7; orbitCtx.fill();
-      }
+    const W = orbitCanvas.width, H = orbitCanvas.height, cx = W/2, cy = H/2;
+    const colors = { intro:'#4a7a8a', verse:'#72a862', chorus:'#d4a843', outro:'#7a6a9a' };
+    const col = colors[state] || '#72a862';
+
+    orbitCtx.fillStyle = 'rgba(10,15,10,0.15)';
+    orbitCtx.fillRect(0, 0, W, H);
+
+    // Draw detected notes as points on a circle
+    const energy = getEnergy();
+    for (let i = 0; i < detectedNotes.length; i++) {
+      const angle = (i / detectedNotes.length) * Math.PI * 2 + performance.now() / 5000;
+      const note = detectedNotes[i];
+      const idx = getScaleIndex(note.freq);
+      const radius = 40 + (idx / SCALE_FREQS.length) * 120 + energy * 80;
+      const x = cx + Math.cos(angle) * radius;
+      const y = cy + Math.sin(angle) * radius;
+      const size = 2 + note.confidence * 8;
+
+      orbitCtx.beginPath();
+      orbitCtx.arc(x, y, size, 0, Math.PI * 2);
+      orbitCtx.fillStyle = col;
+      orbitCtx.globalAlpha = 0.3 + note.confidence * 0.5;
+      orbitCtx.fill();
     }
-    orbitCtx.globalAlpha=1;
-    const r=30+orbEnergy*280+orbPulse*18;
-    const g=orbitCtx.createRadialGradient(cx,cy,0,cx,cy,r+20);
-    g.addColorStop(0,col+'cc'); g.addColorStop(0.5,col+'44'); g.addColorStop(1,'transparent');
-    orbitCtx.beginPath(); orbitCtx.arc(cx,cy,Math.max(2,r),0,Math.PI*2); orbitCtx.fillStyle=g; orbitCtx.fill();
-    orbitCtx.font="700 10px 'Space Mono',monospace"; orbitCtx.fillStyle=col; orbitCtx.globalAlpha=0.6;
-    orbitCtx.textAlign='center'; orbitCtx.textBaseline='middle';
-    orbitCtx.fillText(state.toUpperCase(), cx, cy-8);
-    const rem=Math.max(0,TOTAL_DUR-(performance.now()-startTime)/1000);
-    orbitCtx.font="8px 'Space Mono',monospace"; orbitCtx.fillStyle='#3a4a3a'; orbitCtx.globalAlpha=1;
-    orbitCtx.fillText(Math.floor(rem/60)+':'+(''+(Math.floor(rem%60))).padStart(2,'0'), cx, cy+10);
+
+    orbitCtx.globalAlpha = 1;
+
+    // Center glow
+    const glow = orbitCtx.createRadialGradient(cx, cy, 0, cx, cy, 30 + energy * 100);
+    glow.addColorStop(0, col + '66');
+    glow.addColorStop(1, 'transparent');
+    orbitCtx.beginPath();
+    orbitCtx.arc(cx, cy, 30 + energy * 100, 0, Math.PI * 2);
+    orbitCtx.fillStyle = glow;
+    orbitCtx.fill();
+
+    // State label
+    orbitCtx.font = "700 10px 'Space Mono', monospace";
+    orbitCtx.fillStyle = col;
+    orbitCtx.globalAlpha = 0.6;
+    orbitCtx.textAlign = 'center';
+    orbitCtx.textBaseline = 'middle';
+    orbitCtx.fillText(state.toUpperCase(), cx, cy - 8);
+
+    const rem = Math.max(0, 180 - (performance.now() - startTime) / 1000);
+    orbitCtx.font = "8px 'Space Mono', monospace";
+    orbitCtx.fillStyle = '#3a4a3a';
+    orbitCtx.globalAlpha = 1;
+    orbitCtx.fillText(Math.floor(rem/60)+':'+(''+(Math.floor(rem%60))).padStart(2,'0'), cx, cy + 10);
   }
 
   // ── CONTROLS ──────────────────────────────────────────────
   function bindControls() {
-    $('sl-vol').addEventListener('input', function() {
-      if (masterVol) masterVol.gain.setTargetAtTime(this.value/100, actx.currentTime, .05);
-      $('cv-vol').innerHTML = this.value + '<small>%</small>';
-    });
-    $('sl-reverb').addEventListener('input', function() {
-      if (reverbReturn) reverbReturn.gain.setTargetAtTime(this.value/100, actx.currentTime, .1);
-      $('cv-reverb').innerHTML = this.value + '<small>%</small>';
-    });
-    $('sl-scale').addEventListener('input', function() {
-      const v = this.value / 100;
-      if (gainMelody) gainMelody.gain.rampTo(v * 0.9, 0.2);
-      if (gainBass)   gainBass.gain.rampTo(v * 0.6, 0.2);
-      $('cv-scale').innerHTML = this.value + '<small>%</small>';
-    });
-    $('sl-dry').addEventListener('input', function() {
-      if (dryGain) dryGain.gain.setTargetAtTime(this.value/100*0.3, actx.currentTime, .1);
-      $('cv-dry').innerHTML = this.value + '<small>%</small>';
-    });
-    $('sl-hp').addEventListener('input', function() {
-      if (hpf) hpf.frequency.setTargetAtTime(parseFloat(this.value), actx.currentTime, .1);
-      $('cv-hp').innerHTML = this.value + '<small>Hz</small>';
-    });
-    $('sl-micgain').addEventListener('input', function() {
-      if (micGain) micGain.gain.setTargetAtTime(Math.pow(10, this.value/20), actx.currentTime, .05);
-      $('cv-micgain').innerHTML = this.value + '<small>dB</small>';
-    });
-    // unused sliders — keep them from erroring
-    ['sl-trans', 'sl-noisefloor'].forEach(id => {
-      const el = $(id); if (el) el.addEventListener('input', () => {});
+    const sliders = [
+      { id: 'sl-vol', val: 'cv-vol', unit: '%', fn: v => { if (masterVol) masterVol.gain.setTargetAtTime(v/100, actx.currentTime, .05); } },
+      { id: 'sl-reverb', val: 'cv-reverb', unit: '%', fn: v => { if (reverbReturn) reverbReturn.gain.setTargetAtTime(v/100, actx.currentTime, .1); } },
+      { id: 'sl-dry', val: 'cv-dry', unit: '%', fn: v => { if (dryGain) dryGain.gain.setTargetAtTime(v/100 * 0.3, actx.currentTime, .1); } },
+      { id: 'sl-hp', val: 'cv-hp', unit: 'Hz', fn: v => { if (hpf) hpf.frequency.setTargetAtTime(parseFloat(v), actx.currentTime, .1); } },
+      { id: 'sl-repeat', val: 'cv-repeat', unit: '%', fn: v => { /* pattern repetition */ } },
+      { id: 'sl-harmony', val: 'cv-harmony', unit: '%', fn: v => { /* harmony density */ } },
+    ];
+
+    sliders.forEach(({ id, val, unit, fn }) => {
+      const el = $(id);
+      if (el) {
+        el.addEventListener('input', function() {
+          const v = parseFloat(this.value);
+          $(val).innerHTML = v + `<small>${unit}</small>`;
+          if (fn) fn(v);
+        });
+      }
     });
   }
 
-  // ── CANVAS INIT ───────────────────────────────────────────
+  // ── CANVAS SETUP ──────────────────────────────────────────
   function initCanvases() {
-    wfCanvas  = $('waveform'); wfCtx = wfCanvas.getContext('2d');
-    orbitCanvas = $('orbit-canvas'); orbitCtx = orbitCanvas.getContext('2d');
+    wfCanvas = $('waveform');
+    wfCtx = wfCanvas.getContext('2d');
+    orbitCanvas = $('orbit-canvas');
+    orbitCtx = orbitCanvas.getContext('2d');
+
     function resize() {
+      wfCanvas.width = wfCanvas.parentElement.clientWidth - 28;
+      wfCanvas.height = 80;
       const wrap = $('orbit-wrap');
       const sz = Math.min(wrap.clientWidth, 320);
-      orbitCanvas.width = sz; orbitCanvas.height = sz;
-      wfCanvas.width = wfCanvas.parentElement.clientWidth - 28; wfCanvas.height = 80;
+      orbitCanvas.width = sz;
+      orbitCanvas.height = sz;
     }
-    resize(); window.addEventListener('resize', resize);
+    resize();
+    window.addEventListener('resize', resize);
+  }
+
+  // ── LOGGING ──────────────────────────────────────────────
+  function log(msg) {
+    const el = $('event-log');
+    el.innerHTML = `<div class="event-entry fresh">${msg}</div>`;
+    $('footer-state').textContent = msg.replace(/<[^>]+>/g, '');
   }
 
   // ── START / STOP ──────────────────────────────────────────
   async function start(deviceId) {
     const cfgs = [
-      { audio: { deviceId: deviceId ? {exact:deviceId} : undefined, echoCancellation:false, noiseSuppression:false, autoGainControl:false }},
-      { audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false }},
+      { audio: { deviceId: deviceId ? { exact: deviceId } : undefined, echoCancellation: false, noiseSuppression: false, autoGainControl: false } },
+      { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } },
       { audio: true },
     ];
+
     let stream;
-    for (const c of cfgs) { try { stream = await navigator.mediaDevices.getUserMedia(c); break; } catch(e) {} }
+    for (const c of cfgs) {
+      try { stream = await navigator.mediaDevices.getUserMedia(c); break; } catch(e) {}
+    }
     if (!stream) throw new Error('Microphone access denied.');
     micStream = stream;
 
@@ -1078,127 +961,126 @@ const FW = (function() {
     bindControls();
     initCanvases();
 
-    running = true; startTime = performance.now(); currentState = '';
-    earlyStartScheduled = false;
+    running = true;
+    startTime = performance.now();
+    currentState = 'intro';
 
-    // Fade master in over 3s
     masterVol.gain.setValueAtTime(0, actx.currentTime);
     masterVol.gain.linearRampToValueAtTime(0.75, actx.currentTime + 3);
 
     Tone.Transport.start();
-    applyState('collect');
-
-    // Start recording immediately so we have material ASAP
-    setTimeout(() => recordClip(2000), 300);
-    setTimeout(() => recordClip(1500), 3500);
+    applyState('intro');
 
     rafId = requestAnimationFrame(loop);
-    log('LISTENING · will begin composing once sounds are captured…');
+    log('🌿 LISTENING · The earth is singing…');
   }
 
   function stop() {
     running = false;
     if (rafId) cancelAnimationFrame(rafId);
-    stopSequences();
+    if (melodySeq) { melodySeq.stop(); melodySeq.dispose(); melodySeq = null; }
+    if (harmonySeq) { harmonySeq.stop(); harmonySeq.dispose(); harmonySeq = null; }
+    if (bassSeq) { bassSeq.stop(); bassSeq.dispose(); bassSeq = null; }
     try { Tone.Transport.stop(); Tone.Transport.cancel(); } catch(e) {}
     try { micStream?.getTracks().forEach(t => t.stop()); } catch(e) {}
     try { actx?.close(); } catch(e) {}
-    [shiftMelody, shiftBass, shiftShimmer, gainMelody, gainBass, gainShimmer].forEach(n => {
-      if (n) try { n.dispose(); } catch(e) {}
-    });
-    bank.length = 0;
-    actx = null; micStream = null;
+    running = false;
   }
 
   // ── PUBLIC API ────────────────────────────────────────────
   function toggleFreeze() {
-    // Freeze reverb input
     const frozen = $('btn-freeze').classList.toggle('on');
     if (actx) reverbSend.gain.setTargetAtTime(frozen ? 0 : 0.5, actx.currentTime, 0.5);
-    log(frozen ? 'PAD FROZEN' : 'PAD UNFROZEN');
+    log(frozen ? '❄ PAD FROZEN' : '❄ PAD UNFROZEN');
   }
+
   function manualNote() {
-    if (!bank.length) { log('NO SOUNDS CAPTURED YET'); return; }
-    const clip = pickClip();
-    const deg = Math.floor(Math.random() * SCALE_FREQS.length);
-    const st = Math.round(12 * Math.log2(scaleIdxToHz(deg) / ROOT_HZ));
-    playNote(clip, st, gainMelody, actx.currentTime + 0.01, 0.8);
-    log('MANUAL NOTE → ' + hzToNoteName(scaleIdxToHz(deg)));
-  }
-  function toggleFlutter() {
-    // Rebuild shimmer as a faster random walk
-    const on = $('btn-flutter').classList.toggle('on');
-    if (on) {
-      if (seqShimmer) { seqShimmer.stop(); seqShimmer.dispose(); seqShimmer = null; }
-      const pat = Array.from({length:16}, (_,i) => Math.random() < 0.4 ? Math.floor(Math.random()*15) : null);
-      let fc = pickClip();
-      seqShimmer = new Tone.Sequence((time, deg) => {
-        if (deg===null||!running) return;
-        if (Math.random()<0.1) fc = pickClip()||fc;
-        const st = Math.round(12*Math.log2(scaleIdxToHz(deg)/ROOT_HZ));
-        playNote(fc, st+7, gainShimmer, time, 0.2);
-      }, pat, '8n');
-      seqShimmer.loop = true; seqShimmer.start(0);
-      log('FLUTTER ON');
-    } else {
-      if (seqShimmer) { seqShimmer.stop(); seqShimmer.dispose(); seqShimmer = null; }
-      log('FLUTTER OFF');
+    if (detectedNotes.length === 0) {
+      // Play a random scale note
+      const idx = Math.floor(Math.random() * SCALE_FREQS.length);
+      playTone(SCALE_FREQS[idx], 0.5, 0.2);
+      log('♪ MANUAL NOTE');
+      return;
     }
+    const note = detectedNotes[Math.floor(Math.random() * detectedNotes.length)];
+    playTone(note.freq, 0.4, 0.2);
+    log(`♪ MANUAL NOTE → ${Math.round(note.freq)}Hz`);
   }
+
+  function toggleFlutter() {
+    const on = $('btn-flutter').classList.toggle('on');
+    log(on ? '~ FLUTTER ON · random melody' : '~ FLUTTER OFF');
+  }
+
   function skipState() {
-    const names = SONG_STATES.map(s => s.name);
-    const idx = names.indexOf(currentState);
-    const next = names[Math.min(idx+1, names.length-1)];
-    // Temporarily override
-    currentState = ''; // force applyState to fire
+    const states = ['intro', 'verse', 'chorus', 'outro'];
+    const idx = states.indexOf(currentState);
+    const next = states[Math.min(idx + 1, states.length - 1)];
+    currentState = ''; // force apply
     applyState(next);
   }
 
   return { start, stop, toggleFreeze, manualNote, toggleFlutter, skipState };
 })();
 
-// ── MIC LIST ──────────────────────────────────────────────────
+// ─── MIC LIST ──────────────────────────────────────────────────
 async function populateMics() {
   try {
     const devs = await navigator.mediaDevices.enumerateDevices();
-    const sel = $('mic-select'); while (sel.options.length>1) sel.remove(1);
-    devs.filter(d=>d.kind==='audioinput').forEach(m => {
+    const sel = $('mic-select');
+    while (sel.options.length > 1) sel.remove(1);
+    devs.filter(d => d.kind === 'audioinput').forEach(m => {
       if (!m.deviceId) return;
-      const o = document.createElement('option'); o.value=m.deviceId;
-      o.textContent=m.label||'Mic '+m.deviceId.slice(0,8); sel.appendChild(o);
+      const o = document.createElement('option');
+      o.value = m.deviceId;
+      o.textContent = m.label || 'Mic ' + m.deviceId.slice(0, 8);
+      sel.appendChild(o);
     });
   } catch(e) {}
 }
 
-// ── LOADING ────────────────────────────────────────────────────
+// ─── LOADING ────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', async () => {
   const fill = $('load-fill');
   let pct = 0;
-  const iv = setInterval(() => { pct=Math.min(95,pct+Math.random()*18); fill.style.width=pct+'%'; if(pct>=95)clearInterval(iv); }, 120);
-  await new Promise(r=>setTimeout(r,700));
-  fill.style.width='100%'; await new Promise(r=>setTimeout(r,300));
-  $('loading-screen').classList.add('gone'); await new Promise(r=>setTimeout(r,800));
-  $('loading-screen').style.display='none'; $('start-screen').style.display='flex';
+  const iv = setInterval(() => { pct = Math.min(95, pct + Math.random() * 18); fill.style.width = pct + '%'; if (pct >= 95) clearInterval(iv); }, 120);
+  await new Promise(r => setTimeout(r, 700));
+  fill.style.width = '100%';
+  await new Promise(r => setTimeout(r, 300));
+  $('loading-screen').classList.add('gone');
+  await new Promise(r => setTimeout(r, 800));
+  $('loading-screen').style.display = 'none';
+  $('start-screen').style.display = 'flex';
   await populateMics();
 });
 
-// ── BUTTONS ────────────────────────────────────────────────────
+// ─── BUTTONS ────────────────────────────────────────────────────
 $('btn-start').addEventListener('click', async () => {
-  const btn = $('btn-start'); btn.querySelector('span').textContent='OPENING MIC…'; btn.disabled=true;
+  const btn = $('btn-start');
+  btn.querySelector('span').textContent = 'OPENING MIC…';
+  btn.disabled = true;
   try {
-    await FW.start($('mic-select').value||undefined);
+    await FW.start($('mic-select').value || undefined);
     await populateMics();
-    $('start-screen').style.display='none'; $('main-ui').classList.add('visible');
-    $('live-dot').classList.add('on'); $('live-label').textContent='LIVE';
+    $('start-screen').style.display = 'none';
+    $('main-ui').classList.add('visible');
+    $('live-dot').classList.add('on');
+    $('live-label').textContent = 'LIVE';
   } catch(err) {
-    alert('Could not start.\n\n'+err.message);
-    btn.querySelector('span').textContent='LISTEN'; btn.disabled=false;
+    alert('Could not start.\n\n' + err.message);
+    btn.querySelector('span').textContent = 'LISTEN';
+    btn.disabled = false;
   }
 });
+
 $('btn-stop').addEventListener('click', () => {
-  FW.stop(); $('main-ui').classList.remove('visible'); $('start-screen').style.display='flex';
-  $('live-dot').classList.remove('on'); $('live-label').textContent='STANDBY';
-  $('btn-start').querySelector('span').textContent='LISTEN'; $('btn-start').disabled=false;
+  FW.stop();
+  $('main-ui').classList.remove('visible');
+  $('start-screen').style.display = 'flex';
+  $('live-dot').classList.remove('on');
+  $('live-label').textContent = 'STANDBY';
+  $('btn-start').querySelector('span').textContent = 'LISTEN';
+  $('btn-start').disabled = false;
   populateMics();
 });
 </script>
