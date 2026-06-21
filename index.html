@@ -417,718 +417,454 @@ footer {
 
 <script>
 'use strict';
-
-// ════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 // FIELDWORK — Environment as Instrument
-// Architecture:
-//   1. Raw mic → High-pass filter → Analyser (transient detect)
-//   2. Mic → HPF → Reverb convolver → Ambient pad output
-//   3. Transient peaks → short AudioBuffer capture → rhythmic playback
-//   4. Pitch detect → scale quantize → recorded-grain playback (no synths, ever)
-//   5. Tone.Transport-driven motif engine turns captured grains into an actual
-//      melodic phrase (theme + variation) instead of randomly jumbled hits
-//   5. State machine: INTRO → VERSE → CHORUS → OUTRO over 180s
-// ════════════════════════════════════════════════════════════════
+//
+// HOW IT WORKS:
+//   1. MediaRecorder captures 1.5s audio clips from the mic as blobs
+//   2. Each blob is decoded to an AudioBuffer and stored in a bank
+//   3. Tone.PitchShift tunes every clip to exact pentatonic scale notes
+//   4. Tone.Sequence fires notes on a steady musical grid — like a
+//      step sequencer — repeating captured sounds rhythmically
+//   5. Three layers run simultaneously: melody, bass pad, shimmer
+//   6. A song structure (intro → verse → chorus → outro) shapes
+//      density and register over 2 minutes
+// ═══════════════════════════════════════════════════════════════
 
 const $ = id => document.getElementById(id);
 
-// ── SCALES ───────────────────────────────────────────────────────
-// A-Minor Pentatonic (A C D E G) across multiple octaves
-// Frequencies in Hz, computed from A=440Hz
-const SCALE_SEMITONES = [0, 3, 5, 7, 10]; // A, C, D, E, G relative to A
-const A2 = 110.0; // A2 — root reference
+// ── PENTATONIC SCALE (A minor pentatonic: A C D E G) ─────────
+// Expressed as semitone offsets from A3 (220 Hz)
+const SCALE_ST = [0, 3, 5, 7, 10]; // one octave
+const ROOT_HZ  = 220; // A3
+// Build 4 octaves of scale frequencies
+const SCALE_FREQS = [];
+for (let oct = 0; oct < 4; oct++)
+  for (const st of SCALE_ST)
+    SCALE_FREQS.push(ROOT_HZ * Math.pow(2, (oct * 12 + st) / 12));
 
-function buildScale(root, semitones, octaves = 4) {
-  const freqs = [];
-  for (let oct = 0; oct < octaves; oct++) {
-    for (const st of semitones) {
-      freqs.push(root * Math.pow(2, (oct * 12 + st) / 12));
-    }
-  }
-  return freqs.sort((a, b) => a - b);
+// Convert a frequency to the nearest scale note's semitone offset from A3=220
+function freqToNearestScaleST(hz) {
+  const st = Math.round(12 * Math.log2(hz / ROOT_HZ));
+  const oct = Math.floor(st / 12);
+  const deg = ((st % 12) + 12) % 12;
+  const nearest = SCALE_ST.reduce((a, b) => Math.abs(b - deg) < Math.abs(a - deg) ? b : a);
+  return oct * 12 + nearest;
 }
 
-const SCALE_FREQS = buildScale(A2, SCALE_SEMITONES, 5); // A2..A6 pentatonic
-const SCALE_DEGREES = SCALE_SEMITONES.length; // 5 notes per octave
-
-// SCALE_FREQS is built octave-by-octave in ascending degree order, so it can be
-// addressed directly as [octave][degree] — this is what the melody/motif engine
-// uses to pick "which real recorded sound, pitched to which note" for a phrase.
-function degreeFreq(octave, degree) {
-  const idx = Math.max(0, octave) * SCALE_DEGREES + (((degree % SCALE_DEGREES) + SCALE_DEGREES) % SCALE_DEGREES);
-  return SCALE_FREQS[Math.max(0, Math.min(SCALE_FREQS.length - 1, idx))];
+// Scale degree index (0..19) → Hz
+function scaleIdxToHz(idx) {
+  idx = Math.max(0, Math.min(SCALE_FREQS.length - 1, idx));
+  return SCALE_FREQS[idx];
 }
 
-// Note names for display
-const NOTE_NAMES = ['A', 'C', 'D', 'E', 'G'];
-
-function nearestScaleFreq(freq) {
-  // Map raw frequency to nearest legal scale note
-  let best = SCALE_FREQS[0], bestDist = Infinity;
-  for (const sf of SCALE_FREQS) {
-    // Use cents distance (logarithmic)
-    const dist = Math.abs(1200 * Math.log2(freq / sf));
-    if (dist < bestDist) { bestDist = dist; best = sf; }
-  }
-  return { freq: best, dist: bestDist };
+// Note names for UI
+const NOTE_NAMES = ['A','C','D','E','G'];
+function hzToNoteName(hz) {
+  const midi = Math.round(12 * Math.log2(hz / 440) + 69);
+  const names = ['A','Bb','B','C','Db','D','Eb','E','F','Gb','G','Ab'];
+  return names[((midi % 12) + 12) % 12] + Math.floor(midi / 12 - 1);
 }
 
-function freqToNoteName(freq) {
-  // Convert to nearest MIDI note name
-  const midi = Math.round(12 * Math.log2(freq / 440) + 69);
-  const names = ['A','A#','B','C','C#','D','D#','E','F','F#','G','G#'];
-  const oct = Math.floor(midi / 12) - 1;
-  return names[((midi % 12) + 12) % 12] + oct;
-}
-
-// ── SONG STATES ──────────────────────────────────────────────────
-const SONG_STATES = [
-  { name: 'intro',  start: 0,  end: 8,   label: 'INTRO'  },
-  { name: 'verse',  start: 8,  end: 50,  label: 'VERSE'  },
-  { name: 'chorus', start: 50, end: 100, label: 'CHORUS' },
-  { name: 'outro',  start: 100,end: 120, label: 'OUTRO'  },
-];
-const TOTAL_DUR = 120; // seconds
-
-// ── MOTIF / PHRASE GENERATOR ────────────────────────────────────
-// Instead of triggering a random note on every loud sound (a "jumble"), the
-// piece plays short composed phrases (a melodic contour in scale degrees),
-// repeats each one a couple of times with small variations, then moves on —
-// the way an actual melody is built from a motif. The recorded environment
-// still drives *which* real sound voices each note and how dense/loud the
-// phrase gets, but the note-to-note shape always stays musical.
-const PHRASE_BANK = {
-  verse: [
-    [0, 2, 4, 2],
-    [0, 1, 2, 1],
-    [0, 2, 1, 3, 2],
-    [2, 0, 2, 4, 2],
-    [0, 0, 2, 1],
-  ],
-  chorus: [
-    [0, 2, 4, 3, 2, 4, 1, 0],
-    [4, 2, 0, 2, 4, 2, 0, 1],
-    [0, 1, 2, 4, 2, 1, 0, 2],
-    [2, 4, 2, 0, 1, 2, 4, 2],
-  ],
-};
-
-function generatePhrase(state) {
-  if (state === 'verse') {
-    const baseOct = 1;
-    const contour = PHRASE_BANK.verse[Math.floor(Math.random() * PHRASE_BANK.verse.length)];
-    return contour.map(d => ({ degree: d, octave: baseOct, restProb: 0.14 }));
-  }
-  if (state === 'chorus') {
-    const baseOct = 2;
-    const contour = PHRASE_BANK.chorus[Math.floor(Math.random() * PHRASE_BANK.chorus.length)];
-    return contour.map(d => ({ degree: d, octave: baseOct, restProb: 0.08 }));
-  }
-  if (state === 'outro') {
-    // a single descending resolution back toward the tonic, then silence
-    return [
-      { degree: 4, octave: 1, restProb: 0 },
-      { degree: 2, octave: 1, restProb: 0.15 },
-      { degree: 0, octave: 1, restProb: 0.25 },
-      { degree: 0, octave: 0, restProb: 0.5 },
-    ];
-  }
-  return [];
-}
-
-function subdivisionForState(state) {
-  return { verse: '4n', chorus: '8n', outro: '2n', intro: '4n' }[state] || '4n';
-}
-
-// ── UI SETUP ─────────────────────────────────────────────────────
-// Populate score rows
-(function(){
-  const sr = $('score-rows');
+// Build score rows
+(function() {
+  const el = $('score-rows');
   NOTE_NAMES.forEach(n => {
-    const row = document.createElement('div');
-    row.className = 'score-row';
-    row.id = 'nr-' + n;
-    row.innerHTML = `<div class="note-name">${n}</div><div class="note-bar"><div class="note-fill" id="nf-${n}"></div></div><div class="note-freq" id="nfreq-${n}">–</div>`;
-    sr.appendChild(row);
+    el.innerHTML += `<div class="score-row" id="nr-${n}"><div class="note-name">${n}</div><div class="note-bar"><div class="note-fill" id="nf-${n}"></div></div><div class="note-freq" id="nfreq-${n}">–</div></div>`;
   });
 })();
 
-// ── MAIN AUDIO ENGINE ─────────────────────────────────────────────
-const FW = (function(){
+// ── SONG STRUCTURE ────────────────────────────────────────────
+const TOTAL_DUR = 120; // 2 minutes
+const SONG_STATES = [
+  { name: 'collect', start: 0,   end: 12  }, // just listen, collect sounds
+  { name: 'verse',   start: 12,  end: 55  }, // melody layer only
+  { name: 'chorus',  start: 55,  end: 100 }, // all three layers
+  { name: 'outro',   start: 100, end: 120 }, // thin out and fade
+];
 
-  // State
-  let ctx = null;      // Tone AudioContext (we'll use Tone.getContext())
-  let nativeCtx = null;
-  let micStream = null;
-  let running = false;
-  let startTime = 0;   // performance.now()
-  let rafId = null;
+// ── MELODIC PHRASES ───────────────────────────────────────────
+// Scale degree indices (into the 20-note SCALE_FREQS array)
+// Designed to start at a mid register (index ~5 = A4 area)
+const PHRASES = {
+  verse: [
+    [5, 7, 8, 7, 5, 3, null, null],          // arch up and down
+    [5, null, 5, 7, 8, null, 8, 7],          // sparse climb
+    [3, 5, 3, 5, 7, 5, null, 3],             // oscillate
+    [8, 7, 5, null, 7, 5, 3, null],          // descend
+  ],
+  chorus: [
+    [5, 7, 8, 10, 8, 7, 5, 3, 5, 7, 8, null, 8, 7, 5, null], // long arc
+    [5, 5, 7, null, 8, 7, 5, 7, 8, 10, null, 8, 7, 5, 3, null], // syncopated
+    [3, 5, 7, 8, null, 8, 10, 8, 7, 5, null, 7, 5, 3, null, null], // big climb
+  ],
+};
 
-  // Song
-  let currentState = 'intro';
-  let manualStateOverride = false;
-  let freezePad = false;
-  let flutterMode = false;
-  let lastTransientTime = 0;
-  let lastNoteTime = 0;
-  let noteVelocityHistory = [];
+// ── MAIN ENGINE ───────────────────────────────────────────────
+const FW = (function() {
+  let actx, micStream, micSrc, micGain, hpf, analyser, analyserBuf;
+  let masterVol, reverbSend, reverbReturn, dryGain;
+  let recorder = null;
+  let running = false, startTime = 0, rafId = null;
+  let currentState = '';
 
-  // Audio nodes (Web Audio API native + Tone.js)
-  let micSrc, micGainNode, hpFilter, analyserNode, analyserBuf;
-  let dryGain, masterGain;
-  let reverbNode; // Tone.js Reverb
-  let reverbInputGain, reverbOutputGain;
-  let padGain; // overall ambient pad gain
-  let toneDestination;
+  // Sample bank — each entry is a decoded AudioBuffer
+  const bank = [];
+  const BANK_MAX = 16;
 
-  function dbToGain(db) { return Math.pow(10, db / 20); }
-
-  // ── THE INSTRUMENT ──────────────────────────────────────────
-  // No synths. Every "note" played by the piece is a real chunk of audio
-  // captured from the mic, pitch-shifted (by playback rate) onto the scale.
-  let sampleBank = [];          // [{buffer, baseFreq, pitched, t}]
-  const BANK_MAX = 32;
-  const DEFAULT_BASE_FREQ = 220; // fallback ratio anchor when a grain has no clear pitch
-  let convolverNode;             // shared reverb convolver (also referenced by note sends)
-  let noteOutGain;                // gain stage for all melodic grain playback
-
-  // Melody engine (Tone.Transport-driven, so notes land on a steady musical grid)
-  let flutterLoop = null;
-
-  // Transient capture — short buffer playback
-  let captureNode;
-  let captureBuf = [];
-  let captureActive = false;
-  const CAPTURE_FRAMES = 4096 * 3; // ~0.28s at 44.1k
-  let captureCount = 0;
-  let captureMergeNode;
-
-  // Settings
-  const P = {
-    reverbMix: 0.40,
-    transientThresh: 0.55, // 0..1 → maps to actual RMS threshold
-    scaleVol: 0.60,
-    dry: 0.50,
-    hpFreq: 180,
-    vol: 0.75,
-    micGainDb: 0,     // 0..36dB boost applied to the raw mic signal
-    noiseFloor: 0.15, // 0..1 → maps to an RMS gate threshold, see noiseFloorToRms()
-  };
-
-  // 0..1 slider position → an actual RMS threshold for the noise gate.
-  // Mapped with a curve so the low end of the slider gives fine control
-  // over quiet hiss/static without needing huge slider travel.
-  function noiseFloorToRms(v) {
-    return Math.pow(v, 2) * 0.06;
-  }
+  // Sequencer state
+  let seqMelody = null, seqBass = null, seqShimmer = null;
+  let phraseIdx = 0;
+  // Each layer has its own PitchShift node so they can be at different semitones
+  let shiftMelody, shiftBass, shiftShimmer;
+  // Gain nodes per layer
+  let gainMelody, gainBass, gainShimmer;
 
   // Visualiser
   let wfCanvas, wfCtx, orbitCanvas, orbitCtx;
-  let orbitEnergy = 0, orbitPulse = 0;
-  let orbitHistory = new Float32Array(256).fill(0);
+  let orbEnergy = 0, orbPulse = 0, orbPhase = 0;
 
-  // Event log
-  const MAX_LOG = 3;
-  let logLines = [];
-
-  function log(msg, cls='') {
-    logLines.unshift({ msg, cls: cls || '' });
-    if (logLines.length > MAX_LOG) logLines.length = MAX_LOG;
+  // Log
+  function log(msg) {
     const el = $('event-log');
-    el.innerHTML = logLines.map((l, i) =>
-      `<div class="event-entry ${l.cls} ${i===0?'fresh':''}">${l.msg}</div>`
-    ).join('');
-    $('footer-state').textContent = logLines[0]?.msg || '–';
+    el.innerHTML = `<div class="event-entry fresh">${msg}</div>`;
+    $('footer-state').textContent = msg.replace(/<[^>]+>/g,'');
   }
 
-  // ── MIC OPEN ───────────────────────────────────────────────────
-  async function openMic(deviceId) {
-    const cfgs = [
-      { audio: { deviceId: deviceId ? { exact: deviceId } : undefined, echoCancellation: false, noiseSuppression: false, autoGainControl: false } },
-      { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } },
-      { audio: true }
-    ];
-    for (const c of cfgs) {
-      try { return await navigator.mediaDevices.getUserMedia(c); } catch(e) {}
-    }
-    throw new Error('Microphone access denied — check browser permissions.');
-  }
-
-  // ── IMPULSE RESPONSE (lush reverb tail) ───────────────────────
-  function makeImpulse(actx, dur = 4.0, decay = 2.8) {
+  // ── REVERB IMPULSE ───────────────────────────────────────
+  function makeImpulse(dur = 3.5, decay = 2.0) {
     const sr = actx.sampleRate, len = Math.floor(sr * dur);
     const buf = actx.createBuffer(2, len, sr);
     for (let ch = 0; ch < 2; ch++) {
       const d = buf.getChannelData(ch);
       for (let i = 0; i < len; i++) {
-        // Lush: first 20ms attack, then exponential decay
         const t = i / sr;
-        const attack = Math.min(1, t / 0.02);
-        d[i] = (Math.random() * 2 - 1) * attack * Math.pow(1 - t / dur, decay);
+        d[i] = (Math.random() * 2 - 1) * Math.min(1, t / 0.01) * Math.pow(1 - t / dur, decay);
       }
     }
     return buf;
   }
 
-  // ── AUDIO WORKLET PROCESSOR ───────────────────────────────────
-  // Replaces the deprecated ScriptProcessor.
-  // We define the processor code as a string, turn it into a Blob URL,
-  // and register it with the AudioContext at runtime — keeping everything
-  // in a single HTML file with no external worker scripts needed.
-
-
-
-
-  // ── BUILD GRAPH ────────────────────────────────────────────────
+  // ── BUILD AUDIO GRAPH ────────────────────────────────────
   async function buildGraph(stream) {
-    // Create a brand-new native AudioContext ourselves for every session and
-    // hand it to Tone.js (rather than asking Tone for one). Tone's own
-    // `rawContext` can come back as a wrapped/proxied object in some builds,
-    // which fails the strict BaseAudioContext check the browser does inside
-    // the AudioWorkletNode constructor. A context we created with `new
-    // AudioContext()` is guaranteed to pass that check, and is always fresh
-    // (sidesteps any closed context left over from a previous session too).
-    const AC = window.AudioContext || window.webkitAudioContext;
-    nativeCtx = new AC();
-    Tone.setContext(nativeCtx);
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state === 'suspended') await actx.resume();
+
+    // Set Tone to use the same context
+    Tone.setContext(actx);
     await Tone.start();
 
-    micStream = stream;
-    micSrc = nativeCtx.createMediaStreamSource(stream);
+    micSrc   = actx.createMediaStreamSource(stream);
+    micGain  = actx.createGain(); micGain.gain.value = 1.0;
+    hpf      = actx.createBiquadFilter(); hpf.type = 'highpass'; hpf.frequency.value = 180;
+    analyser = actx.createAnalyser(); analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.6;
+    analyserBuf = new Float32Array(analyser.fftSize);
 
-    // 0. MIC GAIN — boosts the raw signal before anything else touches it,
-    // so quiet/distant sounds become audible *and* detectable as transients
-    // (the gate and pitch detection both see the boosted signal too).
-    micGainNode = nativeCtx.createGain();
-    micGainNode.gain.value = dbToGain(P.micGainDb);
-    micSrc.connect(micGainNode);
+    micSrc.connect(micGain);
+    micGain.connect(hpf);
+    hpf.connect(analyser);
 
-    // 1. HIGH-PASS FILTER — cuts wind / traffic rumble
-    hpFilter = nativeCtx.createBiquadFilter();
-    hpFilter.type = 'highpass';
-    hpFilter.frequency.value = P.hpFreq;
-    hpFilter.Q.value = 0.8;
-    micGainNode.connect(hpFilter);
+    // Master output
+    masterVol = actx.createGain(); masterVol.gain.value = 0.75;
+    masterVol.connect(actx.destination);
 
-    // 2. ANALYSER — for waveform + transient detection
-    analyserNode = nativeCtx.createAnalyser();
-    analyserNode.fftSize = 2048;
-    analyserNode.smoothingTimeConstant = 0.5;
-    analyserBuf = new Float32Array(analyserNode.fftSize);
-    hpFilter.connect(analyserNode);
+    // Reverb send/return
+    const conv = actx.createConvolver(); conv.buffer = makeImpulse();
+    reverbSend   = actx.createGain(); reverbSend.gain.value = 0.5;
+    reverbReturn = actx.createGain(); reverbReturn.gain.value = 0.6;
+    reverbSend.connect(conv); conv.connect(reverbReturn); reverbReturn.connect(masterVol);
 
-    // 3. MASTER OUTPUT
-    masterGain = nativeCtx.createGain();
-    masterGain.gain.value = P.vol;
-    masterGain.connect(nativeCtx.destination);
+    // Dry mic (subtle pass-through for ambient texture)
+    dryGain = actx.createGain(); dryGain.gain.value = 0.0;
+    hpf.connect(dryGain); dryGain.connect(masterVol);
 
-    // 4. DRY PATH (filtered mic → speakers, subtle)
-    dryGain = nativeCtx.createGain();
-    dryGain.gain.value = 0; // starts muted, fades in during intro
-    hpFilter.connect(dryGain);
-    dryGain.connect(masterGain);
+    // ── THREE PITCH SHIFT NODES (one per layer) ─────────
+    // PitchShift lets us retune any captured sound to any scale note
+    // without knowing its original pitch — this is the key to musicality
+    shiftMelody  = new Tone.PitchShift(0).toDestination();
+    shiftBass    = new Tone.PitchShift(0).toDestination();
+    shiftShimmer = new Tone.PitchShift(0).toDestination();
 
-    // 5. REVERB PAD PATH
-    // We build a convolution reverb using a native ConvolverNode
-    // (Tone.Reverb is great but we need native node for the mic src routing)
-    const convolver = nativeCtx.createConvolver();
-    convolver.buffer = makeImpulse(nativeCtx, 4.5, 2.4);
-    convolverNode = convolver;
+    // Per-layer gain (Tone nodes)
+    gainMelody  = new Tone.Gain(0.7).connect(shiftMelody);
+    gainBass    = new Tone.Gain(0.5).connect(shiftBass);
+    gainShimmer = new Tone.Gain(0.35).connect(shiftShimmer);
 
-    reverbInputGain = nativeCtx.createGain();
-    reverbInputGain.gain.value = 1.0;
+    // Also send each layer to reverb
+    shiftMelody.connect(reverbSend);
+    shiftBass.connect(reverbSend);
+    shiftShimmer.connect(reverbSend);
 
-    reverbOutputGain = nativeCtx.createGain();
-    reverbOutputGain.gain.value = P.reverbMix;
-
-    padGain = nativeCtx.createGain();
-    padGain.gain.value = 0; // starts silent
-
-    hpFilter.connect(reverbInputGain);
-    reverbInputGain.connect(convolver);
-    convolver.connect(reverbOutputGain);
-    reverbOutputGain.connect(padGain);
-    padGain.connect(masterGain);
-
-    // 6. TRANSIENT DETECTION — polled via analyserNode in mainLoop
-
-    // 7. MELODIC GRAIN OUTPUT — every "note" is a pitched playback of a real
-    // recorded sound from sampleBank (see playGrainAtFreq). No oscillators,
-    // no synthesized waveforms. This gain stage just controls how loud the
-    // melody layer sits in the mix, and feeds a touch of the same reverb
-    // the ambient pad uses so the melody and pad feel like one space.
-    noteOutGain = nativeCtx.createGain();
-    noteOutGain.gain.value = P.scaleVol;
-    noteOutGain.connect(masterGain);
-    const noteReverbSend = nativeCtx.createGain();
-    noteReverbSend.gain.value = 0.35;
-    noteOutGain.connect(noteReverbSend);
-    noteReverbSend.connect(convolver);
-
-    // Tone.Transport drives the melody engine's musical grid; it shares the
-    // same underlying AudioContext as nativeCtx, so scheduled times line up.
-    Tone.Transport.bpm.value = 86;
+    Tone.Transport.bpm.value = 72;
   }
 
-  let rmsSmooth = 0.0;
-  let gateOpen  = false;
+  // ── RECORD A CLIP ────────────────────────────────────────
+  // Uses MediaRecorder for reliable, properly-decoded audio
+  let isRecording = false;
+  let lastRecordTime = 0;
 
-  function pollTransients() {
-    if (!analyserNode || !analyserBuf) return;
-    analyserNode.getFloatTimeDomainData(analyserBuf);
-    let sum = 0;
-    for (let i = 0; i < analyserBuf.length; i++) sum += analyserBuf[i] * analyserBuf[i];
-    const rms = Math.sqrt(sum / analyserBuf.length);
-    rmsSmooth = rmsSmooth * 0.88 + rms * 0.12;
-    orbitEnergy = orbitEnergy * 0.92 + rms * 0.08;
-    orbitHistory.copyWithin(0, 1);
-    orbitHistory[orbitHistory.length - 1] = Math.min(1, rms * 12);
+  function recordClip(durationMs = 1500) {
+    if (isRecording || !micStream) return;
+    const now = performance.now();
+    if (now - lastRecordTime < 2000) return; // min 2s between captures
+    isRecording = true;
+    lastRecordTime = now;
 
-    const noiseGate = noiseFloorToRms(P.noiseFloor);
-    if (rms < noiseGate) return;
+    const chunks = [];
+    let mr;
+    try {
+      mr = new MediaRecorder(micStream);
+    } catch(e) {
+      isRecording = false; return;
+    }
+    mr.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+    mr.onstop = async () => {
+      isRecording = false;
+      const blob = new Blob(chunks, { type: mr.mimeType });
+      const ab = await blob.arrayBuffer();
+      try {
+        const decoded = await actx.decodeAudioData(ab);
+        addToBank(decoded);
+        log(`CAPTURED · ${decoded.duration.toFixed(1)}s · bank: ${bank.length}/${BANK_MAX}`);
+      } catch(e) { /* decode failed, skip */ }
+    };
+    mr.start();
+    setTimeout(() => { try { mr.stop(); } catch(e) {} }, durationMs);
+  }
 
-    const thresh = 0.005 + (1 - P.transientThresh) * 0.08;
-    const isTransient = rms > rmsSmooth * 2.2 && rms > thresh && !gateOpen;
-    if (isTransient) {
-      const now = performance.now();
-      const state = getCurrentState();
-      const minGap = state === 'verse' ? 400 : state === 'chorus' ? 250 : 600;
-      if (now - lastTransientTime > minGap) {
-        lastTransientTime = now;
-        onTransientDetected(rms, new Float32Array(analyserBuf));
-        gateOpen = true;
-        setTimeout(() => gateOpen = false, minGap * 0.8);
-      }
+  function addToBank(buf) {
+    // Trim silence from start/end and normalise
+    const trimmed = trimAndNormalise(buf);
+    bank.push(trimmed);
+    if (bank.length > BANK_MAX) bank.shift();
+    // If we now have enough sounds, build/rebuild the sequences
+    if (bank.length >= 2 && currentState !== 'collect') rebuildSequences();
+    if (bank.length === 2 && currentState === 'collect') {
+      // We have material — kick off early if still in collect phase
+      scheduleEarlyStart();
     }
   }
 
-  // (legacy stub — no longer used)
-  function onWorkletMessage({ data }) {
-    if (!running) return;
-    const { rms, samples } = data;
+  function trimAndNormalise(buf) {
+    // Find peak and normalise to 0.85
+    const data = buf.getChannelData(0);
+    let peak = 0;
+    for (let i = 0; i < data.length; i++) peak = Math.max(peak, Math.abs(data[i]));
+    if (peak < 0.001) return buf; // silence, return as-is
 
-    // Mirror the smoothed value sent from the worklet
-    rmsSmooth = data.rmsSmooth;
-
-    // NOISE GATE — anything below this RMS floor is treated as silence:
-    // never recorded into the sample bank, never triggers a transient. This
-    // is what keeps hiss/static/room rumble from becoming part of the music.
-    const noiseGate = noiseFloorToRms(P.noiseFloor);
-    if (rms < noiseGate) {
-      orbitEnergy *= 0.92;
-      orbitHistory.copyWithin(0, 1);
-      orbitHistory[orbitHistory.length - 1] = 0;
-      return;
+    const out = actx.createBuffer(1, data.length, buf.sampleRate);
+    const od = out.getChannelData(0);
+    const scale = 0.85 / peak;
+    // Apply fade in/out to prevent clicks when looped
+    const fade = Math.min(256, Math.floor(data.length * 0.05));
+    for (let i = 0; i < data.length; i++) {
+      let g = 1;
+      if (i < fade) g = i / fade;
+      else if (i > data.length - fade) g = (data.length - i) / fade;
+      od[i] = data[i] * scale * g;
     }
-
-    // Transient detection: sudden spike above smoothed floor + absolute floor
-    const thresh = 0.005 + (1 - P.transientThresh) * 0.08;
-    const isTransient = rms > rmsSmooth * 2.2 && rms > thresh && !gateOpen;
-
-    if (isTransient) {
-      const now = performance.now();
-      const state = getCurrentState();
-      const minGap = state === 'verse' ? 400 : state === 'chorus' ? 250 : 600;
-
-      if (now - lastTransientTime > minGap) {
-        lastTransientTime = now;
-        onTransientDetected(rms, samples);
-        gateOpen = true;
-        setTimeout(() => gateOpen = false, minGap * 0.8);
-      }
-    }
-
-    // Update orbit energy from the main-thread side
-    orbitEnergy = orbitEnergy * 0.92 + rms * 0.08;
-    orbitHistory.copyWithin(0, 1);
-    orbitHistory[orbitHistory.length - 1] = Math.min(1, rms * 12);
+    return out;
   }
 
-  // ── TRANSIENT EVENT ───────────────────────────────────────────
-  // Every transient is fed into the sample bank — this is the "recording"
-  // step that builds the instrument out of the actual environment. Whether
-  // it ALSO triggers an immediate organic note depends on the song section;
-  // from verse onward, notes are mostly placed by the motif engine instead
-  // (see startMelodyEngine), so the piece reads as a melody, not a jumble.
-  function onTransientDetected(energy, chunk) {
-    const state = getCurrentState();
-    const sr = nativeCtx.sampleRate;
+  // ── PLAY A CLIP THROUGH A LAYER ──────────────────────────
+  // This is what makes a "note": take a captured clip, tune it
+  // to a specific semitone offset via PitchShift, play it.
+  // The PitchShift node handles pitch WITHOUT changing duration.
+  function playNote(audioBuf, targetHzOrST, layerGain, when, durationSec) {
+    if (!audioBuf || !actx) return;
 
-    const rawFreq = detectPitch(chunk, sr);
-    addToBank(chunk, sr, rawFreq);
-
-    if (state === 'outro') return; // bank still grows quietly, nothing new plays
-
-    playRawBlip(chunk, sr, energy); // the raw, un-pitched field-recording texture
-
-    log(`HEARD · energy ${(energy*100).toFixed(0)}% · ${state.toUpperCase()}`);
-    orbitPulse = 1.0;
-
-    // INTRO ONLY: sparse, un-quantized organic notes — the environment's own
-    // pitch (if it has one), gently pulled onto the scale. No steady beat yet.
-    if (state === 'intro' && Math.random() < 0.35) {
-      let target;
-      if (rawFreq && rawFreq > 60 && rawFreq < 1800) {
-        target = nearestScaleFreq(rawFreq).freq;
-        log(`PITCH DETECT · ${Math.round(rawFreq)}Hz → ${freqToNoteName(target)}`);
-      } else {
-        target = SCALE_FREQS[Math.floor(Math.random() * SCALE_FREQS.length * 0.4)];
-      }
-      playGrainAtFreq(target, nativeCtx.currentTime + 0.02, 0.32);
+    // Convert target to semitones from A3
+    let targetST;
+    if (targetHzOrST > 50) { // it's a frequency
+      targetST = Math.round(12 * Math.log2(targetHzOrST / ROOT_HZ));
+    } else {
+      targetST = targetHzOrST;
     }
-  }
 
-  // Raw, unpitched playback of the captured chunk — pure field-recording
-  // texture sitting underneath the melody, never the source of "notes".
-  function playRawBlip(chunk, sr, energy) {
-    const dur = chunk.length / sr;
-    const audioBuf = nativeCtx.createBuffer(1, chunk.length, sr);
-    audioBuf.copyToChannel(chunk, 0);
+    // PitchShift.pitch is in semitones — we just set it before each note
+    // (works because Tone.Sequence fires notes sequentially, not simultaneously)
+    // We route through a BufferSource → Tone.ToneAudioBuffer wrapper
+    const player = new Tone.Player({ url: audioBuf }).connect(layerGain);
+    // player.loopStart/End let us hold a note longer than the clip
+    const clipDur = audioBuf.duration;
+    if (durationSec > clipDur * 1.2) {
+      player.loop = true;
+      player.loopStart = 0.05;
+      player.loopEnd = clipDur - 0.05;
+    }
 
-    const src = nativeCtx.createBufferSource();
+    // We can't set PitchShift per-note without artefacts if shared,
+    // so instead we use playbackRate on a raw BufferSourceNode + the
+    // shared PitchShift locked to 0. The playbackRate IS the pitch shift.
+    // Rate = 2^(semitones/12)
+    // But we need to pick a reference: what semitone is the raw clip at?
+    // We don't know — so we assume it's "whatever it is" and we tune it
+    // to the target by computing a ratio relative to A3 and applying it.
+    // Since we normalised all clips to the same loudness, the only variable
+    // is pitch. We use playbackRate on a raw src node for precision:
+    player.dispose(); // don't actually use Tone.Player — use raw node for rate control
+
+    const src = actx.createBufferSource();
     src.buffer = audioBuf;
 
-    const envGain = nativeCtx.createGain();
-    const t = nativeCtx.currentTime;
-    const atk = 0.004, rel = Math.min(0.35, dur * 0.85);
-    envGain.gain.setValueAtTime(0, t);
-    envGain.gain.linearRampToValueAtTime(0.45, t + atk);
-    envGain.gain.exponentialRampToValueAtTime(0.001, t + atk + rel);
+    // Pitch via playback rate relative to a reference of A3 = 220Hz.
+    // We set rate so the perceived fundamental lands at targetHz.
+    // Since we don't know the clip's pitch, we assume it plays "as recorded"
+    // at 1x rate and we shift it by the semitone delta from our base octave.
+    // The base is: each new phrase picks a root, and notes are offsets from it.
+    // targetST here is already the absolute semitone we want.
+    const rate = Math.pow(2, targetST / 12); // relative to A3 as 0
+    // Clamp to avoid chipmunk/monster artifacts
+    src.playbackRate.value = Math.max(0.35, Math.min(3.0, rate));
 
-    src.connect(envGain);
-    envGain.connect(masterGain);
-    src.start(t);
-    src.stop(t + atk + rel + 0.05);
-  }
-
-  // ── PITCH DETECTION ────────────────────────────────────────────
-  // Lightweight autocorrelation pitch detection on the captured chunk
-  function detectPitch(buffer, sampleRate) {
-    const n = buffer.length;
-    if (n < 512) return null;
-    const SIZE = Math.min(n, 2048);
-    const buf = buffer.slice(0, SIZE);
-
-    // Autocorrelation
-    let bestR = -1, bestT = -1;
-    const minT = Math.floor(sampleRate / 800); // max 800Hz
-    const maxT = Math.floor(sampleRate / 60);  // min 60Hz
-
-    for (let t = minT; t < maxT; t++) {
-      let r = 0;
-      for (let i = 0; i < SIZE - t; i++) r += buf[i] * buf[i + t];
-      if (r > bestR) { bestR = r; bestT = t; }
-    }
-
-    if (bestT < 1 || bestR < 0.001) return null;
-    return sampleRate / bestT;
-  }
-
-  // ── THE INSTRUMENT: SAMPLE BANK + PITCHED, SUSTAINED GRAIN PLAYBACK ─────
-  // Captured chunks are stored as real AudioBuffers along with whatever
-  // pitch (if any) autocorrelation found in them. To "play a note", we pick
-  // a recorded grain, change its playback rate so its own pitch lands on the
-  // target scale frequency, AND loop it for as long as the note needs to
-  // last — a sample-based instrument that can hold a real musical note,
-  // built entirely out of the environment, never an oscillator.
-  function addToBank(chunk, sr, detectedFreq) {
-    if (!nativeCtx) return;
-    const buf = nativeCtx.createBuffer(1, chunk.length, sr);
-    const data = buf.getChannelData(0);
-    // Short fade in/out on the stored grain itself (not just the playback
-    // envelope) so that when it's looped to sustain a note, the loop seam
-    // doesn't click — this is what lets a tiny captured sound become a
-    // smooth held tone instead of a stuttering blip.
-    const fadeLen = Math.max(8, Math.min(Math.floor(sr * 0.005), Math.floor(chunk.length / 4)));
-    for (let i = 0; i < chunk.length; i++) {
-      let g = 1;
-      if (i < fadeLen) g = i / fadeLen;
-      else if (i > chunk.length - fadeLen) g = (chunk.length - i) / fadeLen;
-      data[i] = chunk[i] * g;
-    }
-    const pitched = !!(detectedFreq && detectedFreq > 50 && detectedFreq < 2000);
-    sampleBank.push({
-      buffer: buf,
-      baseFreq: pitched ? detectedFreq : DEFAULT_BASE_FREQ,
-      pitched,
-      t: performance.now(),
-    });
-    if (sampleBank.length > BANK_MAX) sampleBank.shift();
-  }
-
-  function pickGrain() {
-    if (!sampleBank.length) return null;
-    // Weighted toward recent grains (keeps the melody tied to what's
-    // currently happening outside) but still draws from older ones for variety
-    if (Math.random() < 0.7) {
-      const recentN = Math.min(8, sampleBank.length);
-      return sampleBank[sampleBank.length - 1 - Math.floor(Math.random() * recentN)];
-    }
-    return sampleBank[Math.floor(Math.random() * sampleBank.length)];
-  }
-
-  // durSeconds is the actual musical note length (e.g. an eighth note at the
-  // current tempo) — independent of how long the original recorded grain
-  // was. If the grain is shorter than the note needs to be, it's looped to
-  // sustain; this is the "adjust pitch AND length" part of the instrument.
-  function playGrainAtFreq(targetFreq, when, velocity, durSeconds, noteName, forcedGrain) {
-    const grain = forcedGrain || pickGrain();
-    if (!grain || !nativeCtx || !noteOutGain) return false;
-
-    let rate = targetFreq / grain.baseFreq;
-    // Clamp the pitch-shift ratio so grains still sound like real recorded
-    // sound (no chipmunk/demon artifacts) even when reaching for a far note
-    rate = Math.max(0.5, Math.min(2.4, rate));
-
-    const grainPlayDur = grain.buffer.duration / rate;
-    const dur = Math.max(0.12, durSeconds || grainPlayDur);
-
-    const src = nativeCtx.createBufferSource();
-    src.buffer = grain.buffer;
-    src.playbackRate.value = rate;
-    if (dur > grainPlayDur * 1.15) {
-      // Note needs to last longer than one pass of the grain — loop it
+    if (durationSec > audioBuf.duration / src.playbackRate.value) {
       src.loop = true;
-      src.loopStart = 0;
-      src.loopEnd = grain.buffer.duration;
+      src.loopStart = 0.01;
+      src.loopEnd = audioBuf.duration - 0.01;
     }
 
-    const env = nativeCtx.createGain();
-    const vel = Math.max(0.03, Math.min(1, velocity));
-    const atk = Math.min(0.05, dur * 0.18);
-    const rel = Math.min(0.35, dur * 0.4);
-    const sustainEnd = when + Math.max(atk, dur - rel);
+    // Envelope
+    const env = actx.createGain();
+    const atk = 0.03, rel = Math.min(0.4, durationSec * 0.3);
+    const t = when;
+    env.gain.setValueAtTime(0, t);
+    env.gain.linearRampToValueAtTime(0.8, t + atk);
+    env.gain.setValueAtTime(0.8, t + durationSec - rel);
+    env.gain.exponentialRampToValueAtTime(0.001, t + durationSec);
 
-    env.gain.setValueAtTime(0, when);
-    env.gain.linearRampToValueAtTime(vel, when + atk);
-    env.gain.setValueAtTime(vel, sustainEnd);
-    env.gain.exponentialRampToValueAtTime(0.0008, when + dur + rel);
-
+    // Connect to the layer's Tone gain node (which feeds PitchShift)
+    // Actually bypass PitchShift entirely — rate-based pitch IS pitch shift
     src.connect(env);
-    env.connect(noteOutGain);
-    src.start(when);
-    src.stop(when + dur + rel + 0.05);
+    env.connect(masterVol);           // main out
+    env.connect(reverbSend);          // reverb send
 
-    lastNoteTime = performance.now();
-    highlightNote(targetFreq, vel, noteName || freqToNoteName(targetFreq));
-    return true;
+    src.start(t);
+    src.stop(t + durationSec + 0.05);
+
+    // Flash UI
+    const hz = ROOT_HZ * Math.pow(2, targetST / 12);
+    flashNote(hz);
+    orbPulse = 0.8;
   }
 
-  function highlightNote(freq, vel, noteStr) {
-    const noteLetter = NOTE_NAMES.find(n => noteStr.startsWith(n));
-    if (!noteLetter) return;
-    const row = $('nr-' + noteLetter);
-    const fill = $('nf-' + noteLetter);
-    const freqEl = $('nfreq-' + noteLetter);
+  function flashNote(hz) {
+    const name = hzToNoteName(hz);
+    const letter = NOTE_NAMES.find(n => name.startsWith(n));
+    if (!letter) return;
+    const row = $('nr-' + letter);
+    const fill = $('nf-' + letter);
+    const freq = $('nfreq-' + letter);
     if (row) row.classList.add('lit');
-    if (fill) { fill.style.width = (vel * 100) + '%'; setTimeout(() => { if(fill) fill.style.width = '0'; }, 600); }
-    if (freqEl) freqEl.textContent = Math.round(freq) + 'Hz';
-    noteVelocityHistory.push({ note: noteLetter, t: performance.now() });
+    if (fill) { fill.style.width = '80%'; setTimeout(() => fill && (fill.style.width = '0'), 500); }
+    if (freq) freq.textContent = Math.round(hz) + 'Hz';
+    setTimeout(() => row && row.classList.remove('lit'), 1200);
   }
 
-  // ── MELODY ENGINE ───────────────────────────────────────────────
-  // Runs on Tone.Transport so notes land on a steady musical grid instead of
-  // wherever a transient happened to fire. Plays a short composed phrase
-  // (see generatePhrase / PHRASE_BANK), repeats it a couple of times, then
-  // draws a new variation — theme-and-variation, the basic shape of melody
-  // writing. Crucially, the SAME recorded grain (a "lead voice") is reused
-  // for every note of a phrase, the way a real instrument plays a tune —
-  // instead of a different texture firing on every note. Live input energy
-  // still shapes density/register/loudness, so the piece keeps listening to
-  // the room even while it's "composing".
-  let leadGrain = null;
-  let answerGrain = null;
+  // ── SEQUENCER ─────────────────────────────────────────────
+  // Tone.Sequence fires a callback on a musical grid.
+  // Each layer has its own sequence with its own rhythm pattern.
+  // The callback picks a captured clip from the bank and plays it
+  // at the specified scale degree.
 
-  // ── THREE INDEPENDENT LOOPS = LAYERED COMPOSITION ──────────────
-  // Loop A: MELODY — the main tune, quarter-note grid, mid register
-  // Loop B: BASS TEXTURE — half-note grid, low register, different grain
-  // Loop C: HIGH SHIMMER — eighth-note grid, sparse, high register
-  // Each uses a different captured grain as its "voice" and refreshes
-  // that voice periodically so the piece keeps evolving.
-  let loopA = null, loopB = null, loopC = null;
-  let grainA = null, grainB = null, grainC = null;
-  let motifA = [], motifB = [], motifC = [];
-  let idxA = 0, idxB = 0, idxC = 0;
-  let repA = 0, repB = 0;
-
-  function makeLayer(interval, octaveBase, restProb, velBase, getMotif, getGrain, getGrainRef, setGrainRef, getIdx, setIdx, getRep, setRep, maxRep) {
-    return new Tone.Loop((time) => {
-      const state = getCurrentState();
-      if (!sampleBank.length) return;
-      if (state === 'outro' && Math.random() < 0.6) return; // thin out in outro
-
-      let motif = getMotif();
-      if (!motif.length || getRep() >= maxRep) {
-        motif = generatePhrase(state === 'intro' ? 'verse' : state);
-        // mutate so each layer sounds different even from the same phrase bank
-        if (octaveBase === 0) motif = motif.map(s => ({ ...s, octave: 0, restProb: 0.25 }));
-        if (octaveBase === 3) motif = motif.map(s => ({ ...s, octave: 3, restProb: 0.55, degree: (s.degree + 2) % 5 }));
-        setIdx(0); setRep(0);
-        // Refresh this layer's grain voice every few phrases
-        if (!getGrainRef() || Math.random() < 0.4) setGrainRef(pickGrain());
-        if (!motif.length) return;
-      }
-
-      const step = motif[getIdx() % motif.length];
-      setIdx(getIdx() + 1);
-      if (getIdx() % motif.length === 0) setRep(getRep() + 1);
-      if (!step) return;
-
-      if (Math.random() < step.restProb) return;
-      // In intro/verse, bass and shimmer layers are sparser
-      if (octaveBase !== 1 && state === 'intro' && Math.random() < 0.6) return;
-      if (octaveBase !== 1 && state === 'verse' && Math.random() < 0.35) return;
-
-      const freq = degreeFreq(step.octave, step.degree);
-      const vel = Math.min(0.9, velBase + Math.min(0.25, orbitEnergy * 3));
-      const noteDur = Tone.Time(interval).toSeconds() * 0.88;
-      playGrainAtFreq(freq, time, vel, noteDur, null, getGrainRef());
-    }, interval);
+  function pickClip() {
+    if (!bank.length) return null;
+    // Prefer recent clips (within last 8) but allow older ones
+    const recent = bank.slice(-8);
+    return recent[Math.floor(Math.random() * recent.length)];
   }
 
-  function startMelodyEngine() {
-    if (loopA) return;
+  function buildMelodySeq(state) {
+    const phrasePool = state === 'chorus' ? PHRASES.chorus : PHRASES.verse;
+    const phrase = phrasePool[phraseIdx % phrasePool.length];
+    phraseIdx++;
 
-    // LAYER A — melody, quarter notes, mid register
-    loopA = makeLayer('4n', 1, 0.12, 0.55,
-      () => motifA, () => grainA, () => grainA, g => grainA = g,
-      () => idxA, v => idxA = v, () => repA, v => repA = v, 3);
+    // Beat duration in seconds at current BPM (quarter note)
+    const beatSec = 60 / Tone.Transport.bpm.value;
+    const noteDur = beatSec * 0.85; // slightly shorter than a beat for breathing room
 
-    // LAYER B — bass texture, half notes, low register  
-    loopB = makeLayer('2n', 0, 0.25, 0.38,
-      () => motifB, () => grainB, () => grainB, g => grainB = g,
-      () => idxB, v => idxB = v, () => repB, v => repB = v, 4);
+    // Pick one clip to use as the "voice" for this whole phrase
+    // (same clip = sounds like one instrument playing a melody)
+    let voiceClip = pickClip();
 
-    // LAYER C — shimmer, eighth notes, high register, very sparse
-    loopC = new Tone.Loop((time) => {
-      const state = getCurrentState();
-      if (!sampleBank.length || state === 'intro') return;
-      if (Math.random() < (state === 'verse' ? 0.75 : 0.55)) return;
-      if (!grainC || Math.random() < 0.15) grainC = pickGrain();
-      const deg = Math.floor(Math.random() * 5);
-      const freq = degreeFreq(3, deg);
-      const vel = 0.22 + Math.random() * 0.18;
-      playGrainAtFreq(freq, time, vel, Tone.Time('8n').toSeconds() * 0.7, null, grainC);
-    }, '8n');
+    const steps = phrase.map(deg => {
+      if (deg === null) return null; // rest
+      return { deg, clip: voiceClip };
+    });
 
-    // Stagger starts so layers don't all hit beat 1 simultaneously
-    loopA.start(0);
-    loopB.start(Tone.Time('2n').toSeconds());
-    loopC.start(Tone.Time('1n').toSeconds());
+    if (seqMelody) { seqMelody.stop(); seqMelody.dispose(); }
+    seqMelody = new Tone.Sequence((time, step) => {
+      if (!step || !step.clip || !running) return;
+      // Refresh voice every 2 phrases occasionally
+      if (Math.random() < 0.08) voiceClip = pickClip() || voiceClip;
+      const hz = scaleIdxToHz(step.deg);
+      const st = Math.round(12 * Math.log2(hz / ROOT_HZ));
+      playNote(step.clip, st, gainMelody, time, noteDur);
+    }, steps, '4n');
+
+    seqMelody.loop = true;
+    seqMelody.start(0);
   }
 
-  function stopMelodyEngine() {
-    [loopA, loopB, loopC, flutterLoop].forEach(l => { if (l) { try { l.stop(); l.dispose(); } catch(e) {} } });
-    loopA = loopB = loopC = flutterLoop = null;
-    motifA = []; motifB = []; motifC = [];
-    idxA = idxB = idxC = repA = repB = 0;
-    grainA = grainB = grainC = null;
+  function buildBassSeq() {
+    // Bass: plays on beats 1 and 3, low register (scale index 0..4)
+    // Uses a different clip from the melody for contrast
+    const beatSec = 60 / Tone.Transport.bpm.value;
+    let bassClip = pickClip();
+    const pattern = [0, null, 2, null, 0, null, 3, null]; // scale indices in low oct
+    const dur = beatSec * 1.6; // held longer, overlapping
+
+    if (seqBass) { seqBass.stop(); seqBass.dispose(); }
+    seqBass = new Tone.Sequence((time, deg) => {
+      if (deg === null || !running) return;
+      if (Math.random() < 0.12) bassClip = pickClip() || bassClip;
+      const st = Math.round(12 * Math.log2(scaleIdxToHz(deg) / ROOT_HZ));
+      // Bass is an octave lower: subtract 12 semitones
+      playNote(bassClip, st - 12, gainBass, time, dur);
+    }, pattern, '4n');
+
+    seqBass.loop = true;
+    seqBass.start(Tone.Time('2n')); // offset so it doesn't clash with melody start
   }
 
-  // ── SONG STATE MACHINE ────────────────────────────────────────
-  function getCurrentState() {
-    if (!running) return 'intro';
-    if (manualStateOverride) return currentState;
+  function buildShimmerSeq() {
+    // Shimmer: sparse, high register, random-ish timing via rest-heavy pattern
+    let shimClip = pickClip();
+    const pattern = [null, null, 8, null, null, null, 10, null, null, 7, null, null, null, null, 9, null];
+    const beatSec = 60 / Tone.Transport.bpm.value;
+    const dur = beatSec * 0.4;
+
+    if (seqShimmer) { seqShimmer.stop(); seqShimmer.dispose(); }
+    seqShimmer = new Tone.Sequence((time, deg) => {
+      if (deg === null || !running) return;
+      if (Math.random() < 0.5) return; // extra sparseness
+      if (Math.random() < 0.15) shimClip = pickClip() || shimClip;
+      const st = Math.round(12 * Math.log2(scaleIdxToHz(deg) / ROOT_HZ));
+      playNote(shimClip, st + 12, gainShimmer, time, dur); // octave up
+    }, pattern, '8n');
+
+    seqShimmer.loop = true;
+    seqShimmer.start(Tone.Time('1m')); // starts after 1 bar
+  }
+
+  function rebuildSequences() {
+    const state = currentState;
+    buildMelodySeq(state);
+    if (state === 'chorus') {
+      buildBassSeq();
+      buildShimmerSeq();
+    }
+  }
+
+  function stopSequences() {
+    [seqMelody, seqBass, seqShimmer].forEach(s => {
+      if (s) { try { s.stop(); s.dispose(); } catch(e) {} }
+    });
+    seqMelody = seqBass = seqShimmer = null;
+  }
+
+  // ── SONG STATE MACHINE ────────────────────────────────────
+  function getState() {
+    if (!running) return 'collect';
     const elapsed = (performance.now() - startTime) / 1000;
     for (const s of SONG_STATES) {
       if (elapsed >= s.start && elapsed < s.end) return s.name;
@@ -1136,463 +872,333 @@ const FW = (function(){
     return 'outro';
   }
 
-  function applyState(state) {
-    if (state === currentState) return;
-    const prev = currentState;
-    currentState = state;
-    updateStateUI(state);
+  let earlyStartScheduled = false;
+  function scheduleEarlyStart() {
+    if (earlyStartScheduled) return;
+    earlyStartScheduled = true;
+    setTimeout(() => applyState('verse'), 500);
+  }
 
-    const t = nativeCtx.currentTime;
-    const RAMP = 3.0;
+  function applyState(name) {
+    if (name === currentState) return;
+    currentState = name;
+    updateStateUI(name);
 
-    // Reset all layer motifs so each section starts a fresh phrase
-    motifA = []; motifB = []; idxA = idxB = idxC = repA = repB = 0;
+    const t = actx.currentTime;
+    log(`→ ${name.toUpperCase()}`);
 
-    switch(state) {
-      case 'intro':
-        // Pads slowly wash in, dry is quiet
-        padGain.gain.setTargetAtTime(0.55, t, RAMP);
-        dryGain.gain.setTargetAtTime(0.08, t, RAMP * 0.5);
-        Tone.Transport.bpm.rampTo(86, RAMP);
+    switch(name) {
+      case 'collect':
+        dryGain.gain.setTargetAtTime(0.05, t, 2);
         break;
       case 'verse':
-        // Pad full, dry a bit louder, the motif engine starts placing notes
-        padGain.gain.setTargetAtTime(0.7, t, RAMP * 0.6);
-        dryGain.gain.setTargetAtTime(P.dry * 0.4, t, RAMP * 0.5);
-        Tone.Transport.bpm.rampTo(86, RAMP);
-        log('VERSE · melody begins — drawing notes from what\'s been heard');
+        dryGain.gain.setTargetAtTime(0.08, t, 2);
+        Tone.Transport.bpm.rampTo(72, 3);
+        if (bank.length >= 1) buildMelodySeq('verse');
         break;
       case 'chorus':
-        // Pad slightly quieter to let melody through, dry rises, busier phrase
-        padGain.gain.setTargetAtTime(0.5, t, RAMP * 0.5);
-        dryGain.gain.setTargetAtTime(P.dry * 0.55, t, RAMP * 0.4);
-        Tone.Transport.bpm.rampTo(96, RAMP);
-        log('CHORUS · fuller phrase, melody engine active');
+        dryGain.gain.setTargetAtTime(0.12, t, 2);
+        Tone.Transport.bpm.rampTo(84, 4);
+        if (bank.length >= 1) {
+          buildMelodySeq('chorus');
+          buildBassSeq();
+          buildShimmerSeq();
+        }
         break;
       case 'outro':
-        // Everything fades, dry comes up, melody resolves and slows to a stop
-        padGain.gain.setTargetAtTime(0.15, t, RAMP * 2);
-        dryGain.gain.setTargetAtTime(P.dry * 0.9, t, RAMP);
-        Tone.Transport.bpm.rampTo(64, RAMP * 2.5);
-        log('OUTRO · melody resolving, returning to silence…');
+        dryGain.gain.setTargetAtTime(0.15, t, 4);
+        Tone.Transport.bpm.rampTo(60, 8);
+        // Fade out the sequences over 20s
+        if (seqBass)    { seqBass.stop();    seqBass.dispose();    seqBass    = null; }
+        if (seqShimmer) { seqShimmer.stop(); seqShimmer.dispose(); seqShimmer = null; }
+        masterVol.gain.setTargetAtTime(0.001, t + 10, 6);
         break;
     }
   }
 
-  function updateStateUI(state) {
-    document.querySelectorAll('.state-seg').forEach(el => {
-      el.classList.toggle('active', el.dataset.state === state);
-    });
-    // Timeline fill color
-    const colors = { intro: 'var(--c-intro)', verse: 'var(--c-verse)', chorus: 'var(--c-chorus)', outro: 'var(--c-outro)' };
-    $('timeline-fill').style.background = colors[state] || 'var(--fern)';
+  function updateStateUI(name) {
+    document.querySelectorAll('.state-seg').forEach(el => el.classList.toggle('active', el.dataset.state === name));
+    const cols = { collect:'var(--c-intro)', verse:'var(--c-verse)', chorus:'var(--c-chorus)', outro:'var(--c-outro)' };
+    $('timeline-fill').style.background = cols[name] || 'var(--fern)';
   }
 
-  // ── MAIN LOOP ─────────────────────────────────────────────────
-  function mainLoop(now) {
-    if (!running) return;
-    rafId = requestAnimationFrame(mainLoop);
+  // ── TRANSIENT DETECTION (RAF-based) ──────────────────────
+  let rmsSmooth = 0, rmsGate = false, lastCaptureTime = 0;
 
-    // State machine
-    const state = getCurrentState();
+  function pollMic() {
+    if (!analyser) return;
+    analyser.getFloatTimeDomainData(analyserBuf);
+    let sum = 0;
+    for (let i = 0; i < analyserBuf.length; i++) sum += analyserBuf[i] * analyserBuf[i];
+    const rms = Math.sqrt(sum / analyserBuf.length);
+    rmsSmooth = rmsSmooth * 0.92 + rms * 0.08;
+    orbEnergy = orbEnergy  * 0.94 + rms * 0.06;
+
+    // Auto-capture: record a clip when there's a meaningful signal
+    const isLoud = rms > 0.015 && rms > rmsSmooth * 1.6;
+    const now = performance.now();
+    if (isLoud && !rmsGate && !isRecording && (now - lastCaptureTime) > 2500) {
+      rmsGate = true;
+      lastCaptureTime = now;
+      setTimeout(() => rmsGate = false, 1500);
+      // Capture 1.5 seconds of audio starting now
+      recordClip(1500);
+    }
+
+    // Also auto-capture every 8 seconds regardless (ensures bank stays fresh)
+    if ((now - lastCaptureTime) > 8000 && !isRecording && bank.length < BANK_MAX) {
+      lastCaptureTime = now;
+      recordClip(1500);
+    }
+  }
+
+  // ── MAIN LOOP ─────────────────────────────────────────────
+  function loop(now) {
+    if (!running) return;
+    rafId = requestAnimationFrame(loop);
+
+    const state = getState();
     if (state !== currentState) applyState(state);
 
-    // Timeline progress
     const elapsed = (now - startTime) / 1000;
-    const pct = Math.min(100, (elapsed / TOTAL_DUR) * 100);
-    $('timeline-fill').style.width = pct + '%';
+    $('timeline-fill').style.width = Math.min(100, (elapsed / TOTAL_DUR) * 100) + '%';
+    $('input-energy').textContent = Math.round(Math.min(99, orbEnergy * 800)) + '%';
 
-    // Outro complete
-    if (elapsed >= TOTAL_DUR + 2) {
-      log('COMPOSITION COMPLETE');
-      stop();
-      return;
-    }
+    if (elapsed >= TOTAL_DUR + 2) { stop(); return; }
 
-    // Read analyser
-    if (analyserNode && analyserBuf) {
-      analyserNode.getFloatTimeDomainData(analyserBuf);
-    }
-
-    // Energy for header
-    const rmsDisplay = Math.min(100, orbitEnergy * 1200);
-    $('input-energy').textContent = rmsDisplay > 1 ? Math.round(rmsDisplay) + '% RMS' : '–';
-
-    pollTransients();
-    drawWaveform();
-    drawOrbit(now, state);
-    cleanupScoreRows(now);
+    pollMic();
+    orbPhase += 0.008;
+    orbPulse *= 0.97;
+    drawWaveform(state);
+    drawOrbit(state);
   }
 
-  // ── DRAW ──────────────────────────────────────────────────────
-  function drawWaveform() {
+  // ── DRAW ──────────────────────────────────────────────────
+  const STATE_COL = { collect:'#4a7a8a', verse:'#72a862', chorus:'#d4a843', outro:'#7a6a9a' };
+
+  function drawWaveform(state) {
     if (!wfCtx || !analyserBuf) return;
-    const W = wfCanvas.width, H = wfCanvas.height;
-    wfCtx.fillStyle = '#131a13';
-    wfCtx.fillRect(0, 0, W, H);
-
-    // Center line
-    wfCtx.strokeStyle = '#1e2b1e';
-    wfCtx.lineWidth = 1;
-    wfCtx.beginPath(); wfCtx.moveTo(0, H/2); wfCtx.lineTo(W, H/2); wfCtx.stroke();
-
-    // Waveform
+    const W = wfCanvas.width, H = wfCanvas.height, col = STATE_COL[state] || '#72a862';
+    wfCtx.fillStyle = '#131a13'; wfCtx.fillRect(0,0,W,H);
+    wfCtx.beginPath(); wfCtx.strokeStyle='#1a241a'; wfCtx.lineWidth=1;
+    wfCtx.moveTo(0,H/2); wfCtx.lineTo(W,H/2); wfCtx.stroke();
     const step = W / analyserBuf.length;
-    const state = getCurrentState();
-    const colors = { intro: '#4a7a8a', verse: '#72a862', chorus: '#d4a843', outro: '#7a6a9a' };
-    wfCtx.beginPath();
-    wfCtx.strokeStyle = colors[state] || '#72a862';
-    wfCtx.lineWidth = 1.5;
-    wfCtx.globalAlpha = 0.85;
-    for (let i = 0; i < analyserBuf.length; i++) {
-      const x = i * step, y = H/2 + analyserBuf[i] * H * 0.8;
-      i === 0 ? wfCtx.moveTo(x, y) : wfCtx.lineTo(x, y);
-    }
-    wfCtx.stroke();
-    wfCtx.globalAlpha = 1;
+    wfCtx.beginPath(); wfCtx.strokeStyle=col; wfCtx.lineWidth=1.5; wfCtx.globalAlpha=0.8;
+    for (let i=0;i<analyserBuf.length;i++) { const x=i*step, y=H/2+analyserBuf[i]*H*0.8; i===0?wfCtx.moveTo(x,y):wfCtx.lineTo(x,y); }
+    wfCtx.stroke(); wfCtx.globalAlpha=1;
   }
 
-  function drawOrbit(now, state) {
+  function drawOrbit(state) {
     if (!orbitCtx) return;
-    const W = orbitCanvas.width, H = orbitCanvas.height;
-    const cx = W / 2, cy = H / 2;
-
-    orbitCtx.fillStyle = 'rgba(13,18,13,0.18)';
-    orbitCtx.fillRect(0, 0, W, H);
-
-    const energy = orbitEnergy;
-    orbitPulse = orbitPulse * 0.94;
-
-    const stateColors = {
-      intro:  '#4a7a8a',
-      verse:  '#72a862',
-      chorus: '#d4a843',
-      outro:  '#7a6a9a'
-    };
-    const col = stateColors[state] || '#72a862';
-    const pulseBonus = orbitPulse * 28;
-
-    // Draw history rings (spectrum-like)
-    const steps = orbitHistory.length;
-    for (let i = 0; i < steps; i++) {
-      const a = (i / steps) * Math.PI * 2 - Math.PI / 2;
-      const r = 60 + orbitHistory[i] * 70 + pulseBonus * 0.3;
-      const x = cx + Math.cos(a) * r;
-      const y = cy + Math.sin(a) * r;
-      const alpha = 0.1 + (i / steps) * 0.5;
-      orbitCtx.beginPath();
-      orbitCtx.arc(x, y, 1.5 + orbitHistory[i] * 3, 0, Math.PI * 2);
-      orbitCtx.fillStyle = col;
-      orbitCtx.globalAlpha = alpha;
-      orbitCtx.fill();
+    const W=orbitCanvas.width, H=orbitCanvas.height, cx=W/2, cy=H/2;
+    const col = STATE_COL[state] || '#72a862';
+    orbitCtx.fillStyle='rgba(10,15,10,0.18)'; orbitCtx.fillRect(0,0,W,H);
+    if (analyserBuf) {
+      for (let i=0;i<128;i++) {
+        const a=(i/128)*Math.PI*2+orbPhase;
+        const amp=Math.abs(analyserBuf[i*8]||0);
+        const r=55+amp*65+orbPulse*20;
+        orbitCtx.beginPath(); orbitCtx.arc(cx+Math.cos(a)*r, cy+Math.sin(a)*r, 1+amp*4, 0, Math.PI*2);
+        orbitCtx.fillStyle=col; orbitCtx.globalAlpha=0.1+amp*0.7; orbitCtx.fill();
+      }
     }
-    orbitCtx.globalAlpha = 1;
-
-    // Core circle — breathes with energy
-    const baseR = 38 + energy * 400 + pulseBonus;
-    const grad = orbitCtx.createRadialGradient(cx, cy, 0, cx, cy, baseR + 20);
-    grad.addColorStop(0, col + 'aa');
-    grad.addColorStop(0.5, col + '33');
-    grad.addColorStop(1, 'transparent');
-    orbitCtx.beginPath();
-    orbitCtx.arc(cx, cy, baseR, 0, Math.PI * 2);
-    orbitCtx.fillStyle = grad;
-    orbitCtx.fill();
-
-    // Outer ring
-    orbitCtx.beginPath();
-    orbitCtx.arc(cx, cy, 110 + pulseBonus * 0.5, 0, Math.PI * 2);
-    orbitCtx.strokeStyle = col + '18';
-    orbitCtx.lineWidth = 1;
-    orbitCtx.stroke();
-
-    // State label in center
-    orbitCtx.font = "700 11px 'Space Mono', monospace";
-    orbitCtx.fillStyle = col;
-    orbitCtx.globalAlpha = 0.7;
-    orbitCtx.textAlign = 'center';
-    orbitCtx.textBaseline = 'middle';
-    orbitCtx.fillText(state.toUpperCase(), cx, cy);
-    orbitCtx.globalAlpha = 1;
-
-    // Time remaining
-    const elapsed = (now - startTime) / 1000;
-    const remain = Math.max(0, TOTAL_DUR - elapsed);
-    const mm = Math.floor(remain / 60);
-    const ss = String(Math.floor(remain % 60)).padStart(2, '0');
-    orbitCtx.font = "9px 'Space Mono', monospace";
-    orbitCtx.fillStyle = '#3a4a3a';
-    orbitCtx.fillText(mm + ':' + ss, cx, cy + 20);
+    orbitCtx.globalAlpha=1;
+    const r=30+orbEnergy*280+orbPulse*18;
+    const g=orbitCtx.createRadialGradient(cx,cy,0,cx,cy,r+20);
+    g.addColorStop(0,col+'cc'); g.addColorStop(0.5,col+'44'); g.addColorStop(1,'transparent');
+    orbitCtx.beginPath(); orbitCtx.arc(cx,cy,Math.max(2,r),0,Math.PI*2); orbitCtx.fillStyle=g; orbitCtx.fill();
+    orbitCtx.font="700 10px 'Space Mono',monospace"; orbitCtx.fillStyle=col; orbitCtx.globalAlpha=0.6;
+    orbitCtx.textAlign='center'; orbitCtx.textBaseline='middle';
+    orbitCtx.fillText(state.toUpperCase(), cx, cy-8);
+    const rem=Math.max(0,TOTAL_DUR-(performance.now()-startTime)/1000);
+    orbitCtx.font="8px 'Space Mono',monospace"; orbitCtx.fillStyle='#3a4a3a'; orbitCtx.globalAlpha=1;
+    orbitCtx.fillText(Math.floor(rem/60)+':'+(''+(Math.floor(rem%60))).padStart(2,'0'), cx, cy+10);
   }
 
-  function cleanupScoreRows(now) {
-    // Fade out note rows that haven't been hit recently
-    noteVelocityHistory = noteVelocityHistory.filter(h => now - h.t < 3000);
-    const recentNotes = new Set(noteVelocityHistory.map(h => h.note));
-    NOTE_NAMES.forEach(n => {
-      const row = $('nr-' + n);
-      if (row) row.classList.toggle('lit', recentNotes.has(n));
-    });
-  }
-
-  // ── CONTROLS ──────────────────────────────────────────────────
-  function bindSlider(id, key, cb) {
-    $(id).addEventListener('input', function() {
-      const v = parseFloat(this.value);
-      P[key] = v / ((key === 'hpFreq' || key === 'micGainDb') ? 1 : 100);
-      if (cb) cb(P[key]);
-      updateSliderLabel(key, v);
-    });
-  }
-
-  function updateSliderLabel(key, raw) {
-    const map = { reverbMix: ['cv-reverb', '%'], transientThresh: ['cv-trans', '%'], scaleVol: ['cv-scale', '%'], dry: ['cv-dry', '%'], hpFreq: ['cv-hp', 'Hz'], vol: ['cv-vol', '%'], micGainDb: ['cv-micgain', 'dB'], noiseFloor: ['cv-noisefloor', '%'] };
-    const [elId, unit] = map[key] || [];
-    if (elId) {
-      $(elId).innerHTML = Math.round(raw) + `<small>${unit}</small>`;
-    }
-  }
-
+  // ── CONTROLS ──────────────────────────────────────────────
   function bindControls() {
-    bindSlider('sl-reverb', 'reverbMix', v => {
-      if (reverbOutputGain && !freezePad) reverbOutputGain.gain.setTargetAtTime(v, nativeCtx.currentTime, .2);
+    $('sl-vol').addEventListener('input', function() {
+      if (masterVol) masterVol.gain.setTargetAtTime(this.value/100, actx.currentTime, .05);
+      $('cv-vol').innerHTML = this.value + '<small>%</small>';
     });
-    bindSlider('sl-trans', 'transientThresh');
-    bindSlider('sl-scale', 'scaleVol', v => {
-      if (noteOutGain) noteOutGain.gain.setTargetAtTime(v, nativeCtx.currentTime, .1);
+    $('sl-reverb').addEventListener('input', function() {
+      if (reverbReturn) reverbReturn.gain.setTargetAtTime(this.value/100, actx.currentTime, .1);
+      $('cv-reverb').innerHTML = this.value + '<small>%</small>';
     });
-    bindSlider('sl-dry', 'dry', v => {
-      if (dryGain) dryGain.gain.setTargetAtTime(v * 0.5, nativeCtx.currentTime, .2);
+    $('sl-scale').addEventListener('input', function() {
+      const v = this.value / 100;
+      if (gainMelody) gainMelody.gain.rampTo(v * 0.9, 0.2);
+      if (gainBass)   gainBass.gain.rampTo(v * 0.6, 0.2);
+      $('cv-scale').innerHTML = this.value + '<small>%</small>';
     });
-    bindSlider('sl-hp', 'hpFreq', v => {
-      if (hpFilter) hpFilter.frequency.setTargetAtTime(v, nativeCtx.currentTime, .1);
+    $('sl-dry').addEventListener('input', function() {
+      if (dryGain) dryGain.gain.setTargetAtTime(this.value/100*0.3, actx.currentTime, .1);
+      $('cv-dry').innerHTML = this.value + '<small>%</small>';
     });
-    bindSlider('sl-vol', 'vol', v => {
-      if (masterGain) masterGain.gain.setTargetAtTime(v, nativeCtx.currentTime, .05);
+    $('sl-hp').addEventListener('input', function() {
+      if (hpf) hpf.frequency.setTargetAtTime(parseFloat(this.value), actx.currentTime, .1);
+      $('cv-hp').innerHTML = this.value + '<small>Hz</small>';
     });
-    bindSlider('sl-micgain', 'micGainDb', v => {
-      if (micGainNode) micGainNode.gain.setTargetAtTime(dbToGain(v), nativeCtx.currentTime, .08);
+    $('sl-micgain').addEventListener('input', function() {
+      if (micGain) micGain.gain.setTargetAtTime(Math.pow(10, this.value/20), actx.currentTime, .05);
+      $('cv-micgain').innerHTML = this.value + '<small>dB</small>';
     });
-    bindSlider('sl-noisefloor', 'noiseFloor');
+    // unused sliders — keep them from erroring
+    ['sl-trans', 'sl-noisefloor'].forEach(id => {
+      const el = $(id); if (el) el.addEventListener('input', () => {});
+    });
   }
 
-  // ── PERFORMANCE ACTIONS ───────────────────────────────────────
-  function toggleFreeze() {
-    freezePad = !freezePad;
-    const btn = $('btn-freeze');
-    btn.classList.toggle('on', freezePad);
-    btn.querySelector('b').textContent = freezePad ? '❄ FROZEN' : '❄ FREEZE';
-    if (reverbInputGain) {
-      reverbInputGain.gain.setTargetAtTime(freezePad ? 0 : 1, nativeCtx.currentTime, 0.5);
-    }
-    log(freezePad ? 'PAD FROZEN — no new input to reverb' : 'PAD UNFROZEN');
-  }
-
-  function manualNote() {
-    if (!nativeCtx || !running) return;
-    const state = getCurrentState();
-    if (state === 'intro' || state === 'outro') { log('MELODY ENGINE INACTIVE IN ' + state.toUpperCase()); return; }
-    if (!sampleBank.length) { log('NOTHING RECORDED YET — let it listen a moment'); return; }
-    const idx = Math.floor(Math.random() * SCALE_FREQS.length);
-    playGrainAtFreq(SCALE_FREQS[idx], nativeCtx.currentTime + 0.01, 0.55 + Math.random() * 0.2, 0.55);
-    log('MANUAL NOTE → ' + freqToNoteName(SCALE_FREQS[idx]) + ' (from recorded grain)');
-    orbitPulse = 0.8;
-  }
-
-  function toggleFlutter() {
-    flutterMode = !flutterMode;
-    $('btn-flutter').classList.toggle('on', flutterMode);
-    $('btn-flutter').querySelector('b').textContent = flutterMode ? '~ FLUTTERING' : '~ FLUTTER';
-    if (flutterMode) {
-      // An extra fast, lightly-melodic cascade layered over the main motif —
-      // still drawn from recorded grains, still landing on scale degrees,
-      // just denser. Walks the scale rather than jumping randomly, so it
-      // reads as a run rather than noise, and reuses one recorded grain
-      // (refreshed every so often) so the run sounds like one voice too.
-      let walkIdx = Math.floor(SCALE_FREQS.length / 2);
-      let flutterGrain = pickGrain();
-      let stepCount = 0;
-      flutterLoop = new Tone.Loop((time) => {
-        if (!sampleBank.length) return;
-        stepCount++;
-        if (stepCount % 6 === 0) flutterGrain = pickGrain();
-        walkIdx += (Math.random() < 0.5 ? 1 : -1) * (Math.random() < 0.2 ? 2 : 1);
-        walkIdx = Math.max(0, Math.min(SCALE_FREQS.length - 1, walkIdx));
-        const dur = Tone.Time('16n').toSeconds() * 0.85;
-        playGrainAtFreq(SCALE_FREQS[walkIdx], time, 0.4, dur, null, flutterGrain);
-      }, '16n').start(0);
-      log('FLUTTER ON — fast melodic run, still drawn from recorded sound');
-    } else {
-      if (flutterLoop) { flutterLoop.stop(); flutterLoop.dispose(); flutterLoop = null; }
-      log('FLUTTER OFF');
-    }
-  }
-
-  function skipState() {
-    const states = ['intro', 'verse', 'chorus', 'outro'];
-    const idx = states.indexOf(currentState);
-    const next = states[Math.min(idx + 1, states.length - 1)];
-    manualStateOverride = true;
-    applyState(next);
-    log('SKIPPED TO ' + next.toUpperCase());
-    // After a short window, let the timeline take over again
-    setTimeout(() => { manualStateOverride = false; }, 8000);
-  }
-
-  // ── INTRO FADE-IN SEQUENCE ────────────────────────────────────
-  function startIntroSequence() {
-    const t = nativeCtx.currentTime;
-    // Silence everything, then slowly breathe in
-    masterGain.gain.setValueAtTime(0, t);
-    masterGain.gain.linearRampToValueAtTime(P.vol, t + 4);
-
-    // Pad starts at 0, rises over 8s
-    padGain.gain.setValueAtTime(0, t);
-    padGain.gain.setTargetAtTime(0.45, t + 1, 3.5);
-
-    // Dry barely audible in intro
-    dryGain.gain.setValueAtTime(0, t);
-    dryGain.gain.setTargetAtTime(0.06, t + 2, 2.5);
-
-    updateStateUI('intro');
-    log('INTRO · ambient pad washing in…');
-  }
-
-  // ── CANVAS INIT ───────────────────────────────────────────────
+  // ── CANVAS INIT ───────────────────────────────────────────
   function initCanvases() {
-    wfCanvas = $('waveform');
-    wfCtx = wfCanvas.getContext('2d');
-    orbitCanvas = $('orbit-canvas');
-    orbitCtx = orbitCanvas.getContext('2d');
-    resizeCanvases();
-    window.addEventListener('resize', resizeCanvases);
+    wfCanvas  = $('waveform'); wfCtx = wfCanvas.getContext('2d');
+    orbitCanvas = $('orbit-canvas'); orbitCtx = orbitCanvas.getContext('2d');
+    function resize() {
+      const wrap = $('orbit-wrap');
+      const sz = Math.min(wrap.clientWidth, 320);
+      orbitCanvas.width = sz; orbitCanvas.height = sz;
+      wfCanvas.width = wfCanvas.parentElement.clientWidth - 28; wfCanvas.height = 80;
+    }
+    resize(); window.addEventListener('resize', resize);
   }
 
-  function resizeCanvases() {
-    const wrap = $('orbit-wrap');
-    const size = Math.min(wrap.clientWidth, 320);
-    orbitCanvas.width = size;
-    orbitCanvas.height = size;
-
-    const wfWrap = wfCanvas.parentElement;
-    wfCanvas.width = wfWrap.clientWidth - 28;
-    wfCanvas.height = 80;
-  }
-
-  // ── START ─────────────────────────────────────────────────────
+  // ── START / STOP ──────────────────────────────────────────
   async function start(deviceId) {
-    const stream = await openMic(deviceId);
+    const cfgs = [
+      { audio: { deviceId: deviceId ? {exact:deviceId} : undefined, echoCancellation:false, noiseSuppression:false, autoGainControl:false }},
+      { audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false }},
+      { audio: true },
+    ];
+    let stream;
+    for (const c of cfgs) { try { stream = await navigator.mediaDevices.getUserMedia(c); break; } catch(e) {} }
+    if (!stream) throw new Error('Microphone access denied.');
+    micStream = stream;
+
     await buildGraph(stream);
     bindControls();
     initCanvases();
-    running = true;
-    startTime = performance.now();
-    currentState = 'intro';
-    startIntroSequence();
+
+    running = true; startTime = performance.now(); currentState = '';
+    earlyStartScheduled = false;
+
+    // Fade master in over 3s
+    masterVol.gain.setValueAtTime(0, actx.currentTime);
+    masterVol.gain.linearRampToValueAtTime(0.75, actx.currentTime + 3);
+
     Tone.Transport.start();
-    startMelodyEngine();
-    // Seed bank immediately with room tone so melody can start right away,
-    // then keep topping up every 2s so there's always fresh material
-    const seedBank = () => {
-      if (!running || !analyserBuf) return;
-      analyserNode.getFloatTimeDomainData(analyserBuf);
-      addToBank(new Float32Array(analyserBuf), nativeCtx.sampleRate, null);
-    };
-    setTimeout(seedBank, 800);
-    setTimeout(seedBank, 2000);
-    setTimeout(seedBank, 4000);
-    // After 6s, top up every 3s with whatever the mic is hearing
-    const autoSeed = setInterval(() => { if (!running) { clearInterval(autoSeed); return; } seedBank(); }, 3000);
-    rafId = requestAnimationFrame(mainLoop);
-    log('FIELDWORK ACTIVE · listening to environment');
+    applyState('collect');
+
+    // Start recording immediately so we have material ASAP
+    setTimeout(() => recordClip(2000), 300);
+    setTimeout(() => recordClip(1500), 3500);
+
+    rafId = requestAnimationFrame(loop);
+    log('LISTENING · will begin composing once sounds are captured…');
   }
 
   function stop() {
     running = false;
     if (rafId) cancelAnimationFrame(rafId);
-    stopMelodyEngine();
+    stopSequences();
     try { Tone.Transport.stop(); Tone.Transport.cancel(); } catch(e) {}
     try { micStream?.getTracks().forEach(t => t.stop()); } catch(e) {}
-    try { nativeCtx?.close(); } catch(e) {}
-    sampleBank = [];
-    ctx = null; nativeCtx = null; micStream = null; noteOutGain = null; convolverNode = null; micGainNode = null;
+    try { actx?.close(); } catch(e) {}
+    [shiftMelody, shiftBass, shiftShimmer, gainMelody, gainBass, gainShimmer].forEach(n => {
+      if (n) try { n.dispose(); } catch(e) {}
+    });
+    bank.length = 0;
+    actx = null; micStream = null;
+  }
+
+  // ── PUBLIC API ────────────────────────────────────────────
+  function toggleFreeze() {
+    // Freeze reverb input
+    const frozen = $('btn-freeze').classList.toggle('on');
+    if (actx) reverbSend.gain.setTargetAtTime(frozen ? 0 : 0.5, actx.currentTime, 0.5);
+    log(frozen ? 'PAD FROZEN' : 'PAD UNFROZEN');
+  }
+  function manualNote() {
+    if (!bank.length) { log('NO SOUNDS CAPTURED YET'); return; }
+    const clip = pickClip();
+    const deg = Math.floor(Math.random() * SCALE_FREQS.length);
+    const st = Math.round(12 * Math.log2(scaleIdxToHz(deg) / ROOT_HZ));
+    playNote(clip, st, gainMelody, actx.currentTime + 0.01, 0.8);
+    log('MANUAL NOTE → ' + hzToNoteName(scaleIdxToHz(deg)));
+  }
+  function toggleFlutter() {
+    // Rebuild shimmer as a faster random walk
+    const on = $('btn-flutter').classList.toggle('on');
+    if (on) {
+      if (seqShimmer) { seqShimmer.stop(); seqShimmer.dispose(); seqShimmer = null; }
+      const pat = Array.from({length:16}, (_,i) => Math.random() < 0.4 ? Math.floor(Math.random()*15) : null);
+      let fc = pickClip();
+      seqShimmer = new Tone.Sequence((time, deg) => {
+        if (deg===null||!running) return;
+        if (Math.random()<0.1) fc = pickClip()||fc;
+        const st = Math.round(12*Math.log2(scaleIdxToHz(deg)/ROOT_HZ));
+        playNote(fc, st+7, gainShimmer, time, 0.2);
+      }, pat, '8n');
+      seqShimmer.loop = true; seqShimmer.start(0);
+      log('FLUTTER ON');
+    } else {
+      if (seqShimmer) { seqShimmer.stop(); seqShimmer.dispose(); seqShimmer = null; }
+      log('FLUTTER OFF');
+    }
+  }
+  function skipState() {
+    const names = SONG_STATES.map(s => s.name);
+    const idx = names.indexOf(currentState);
+    const next = names[Math.min(idx+1, names.length-1)];
+    // Temporarily override
+    currentState = ''; // force applyState to fire
+    applyState(next);
   }
 
   return { start, stop, toggleFreeze, manualNote, toggleFlutter, skipState };
-
 })();
 
-// ── MIC POPULATION ───────────────────────────────────────────────
+// ── MIC LIST ──────────────────────────────────────────────────
 async function populateMics() {
   try {
     const devs = await navigator.mediaDevices.enumerateDevices();
-    const sel = $('mic-select');
-    while (sel.options.length > 1) sel.remove(1);
-    devs.filter(d => d.kind === 'audioinput').forEach(m => {
+    const sel = $('mic-select'); while (sel.options.length>1) sel.remove(1);
+    devs.filter(d=>d.kind==='audioinput').forEach(m => {
       if (!m.deviceId) return;
-      const o = document.createElement('option');
-      o.value = m.deviceId;
-      o.textContent = m.label || 'Microphone ' + m.deviceId.slice(0, 8);
-      sel.appendChild(o);
+      const o = document.createElement('option'); o.value=m.deviceId;
+      o.textContent=m.label||'Mic '+m.deviceId.slice(0,8); sel.appendChild(o);
     });
   } catch(e) {}
 }
 
-// ── LOADING SEQUENCE ─────────────────────────────────────────────
+// ── LOADING ────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', async () => {
   const fill = $('load-fill');
-  // Simulate load progress while Tone.js initialises
   let pct = 0;
-  const iv = setInterval(() => {
-    pct = Math.min(95, pct + (Math.random() * 18));
-    fill.style.width = pct + '%';
-    if (pct >= 95) clearInterval(iv);
-  }, 120);
-
-  // Wait for Tone.js to be ready-ish
-  await new Promise(r => setTimeout(r, 600));
-  fill.style.width = '100%';
-  await new Promise(r => setTimeout(r, 300));
-
-  $('loading-screen').classList.add('gone');
-  await new Promise(r => setTimeout(r, 800));
-  $('loading-screen').style.display = 'none';
-  $('start-screen').style.display = 'flex';
-
+  const iv = setInterval(() => { pct=Math.min(95,pct+Math.random()*18); fill.style.width=pct+'%'; if(pct>=95)clearInterval(iv); }, 120);
+  await new Promise(r=>setTimeout(r,700));
+  fill.style.width='100%'; await new Promise(r=>setTimeout(r,300));
+  $('loading-screen').classList.add('gone'); await new Promise(r=>setTimeout(r,800));
+  $('loading-screen').style.display='none'; $('start-screen').style.display='flex';
   await populateMics();
 });
 
-// ── START / STOP ─────────────────────────────────────────────────
+// ── BUTTONS ────────────────────────────────────────────────────
 $('btn-start').addEventListener('click', async () => {
-  const btn = $('btn-start');
-  btn.querySelector('span').textContent = 'OPENING MIC…';
-  btn.disabled = true;
-
+  const btn = $('btn-start'); btn.querySelector('span').textContent='OPENING MIC…'; btn.disabled=true;
   try {
-    const deviceId = $('mic-select').value || undefined;
-    await FW.start(deviceId);
+    await FW.start($('mic-select').value||undefined);
     await populateMics();
-
-    $('start-screen').style.display = 'none';
-    $('main-ui').classList.add('visible');
-    $('live-dot').classList.add('on');
-    $('live-label').textContent = 'LIVE';
-
+    $('start-screen').style.display='none'; $('main-ui').classList.add('visible');
+    $('live-dot').classList.add('on'); $('live-label').textContent='LIVE';
   } catch(err) {
-    alert('Could not start.\n\n' + err.message);
-    btn.querySelector('span').textContent = 'LISTEN';
-    btn.disabled = false;
+    alert('Could not start.\n\n'+err.message);
+    btn.querySelector('span').textContent='LISTEN'; btn.disabled=false;
   }
 });
-
 $('btn-stop').addEventListener('click', () => {
-  FW.stop();
-  $('main-ui').classList.remove('visible');
-  $('start-screen').style.display = 'flex';
-  $('live-dot').classList.remove('on');
-  $('live-label').textContent = 'STANDBY';
-  $('btn-start').querySelector('span').textContent = 'LISTEN';
-  $('btn-start').disabled = false;
+  FW.stop(); $('main-ui').classList.remove('visible'); $('start-screen').style.display='flex';
+  $('live-dot').classList.remove('on'); $('live-label').textContent='STANDBY';
+  $('btn-start').querySelector('span').textContent='LISTEN'; $('btn-start').disabled=false;
   populateMics();
 });
 </script>
