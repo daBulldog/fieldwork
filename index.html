@@ -680,45 +680,7 @@ const FW = (function(){
   // and register it with the AudioContext at runtime — keeping everything
   // in a single HTML file with no external worker scripts needed.
 
-  const WORKLET_CODE = `
-class TransientProcessor extends AudioWorkletProcessor {
-  constructor() {
-    super();
-    this._rmsSmooth = 0;
-    this._buf = [];          // rolling sample accumulator
-    this._BUF_SIZE = 4096;  // matches old ScriptProcessor block size
-  }
 
-  process(inputs) {
-    const ch = inputs[0]?.[0];
-    if (!ch) return true;
-
-    // Accumulate samples until we have a full block
-    for (let i = 0; i < ch.length; i++) this._buf.push(ch[i]);
-
-    while (this._buf.length >= this._BUF_SIZE) {
-      const block = this._buf.splice(0, this._BUF_SIZE);
-
-      // RMS of this block
-      let sum = 0;
-      for (let i = 0; i < block.length; i++) sum += block[i] * block[i];
-      const rms = Math.sqrt(sum / block.length);
-
-      this._rmsSmooth = this._rmsSmooth * 0.88 + rms * 0.12;
-
-      // Send the block + metrics to the main thread
-      this.port.postMessage({
-        rms,
-        rmsSmooth: this._rmsSmooth,
-        samples: new Float32Array(block),   // transferable copy
-      }, [new Float32Array(block).buffer]);
-    }
-
-    return true; // keep processor alive
-  }
-}
-registerProcessor('transient-processor', TransientProcessor);
-`;
 
 
   // ── BUILD GRAPH ────────────────────────────────────────────────
@@ -792,28 +754,7 @@ registerProcessor('transient-processor', TransientProcessor);
     reverbOutputGain.connect(padGain);
     padGain.connect(masterGain);
 
-    // 6. TRANSIENT CAPTURE NODE (AudioWorklet — replaces deprecated ScriptProcessor)
-    // Register the processor from a Blob URL so we stay single-file.
-    if (!nativeCtx.audioWorklet) {
-      throw new Error('This browser doesn\'t support AudioWorklet (needed to listen for sounds). Try a recent Chrome, Edge, or Firefox — or Safari 14.1+.');
-    }
-    const blob = new Blob([WORKLET_CODE], { type: 'application/javascript' });
-    const blobUrl = URL.createObjectURL(blob);
-    try {
-      await nativeCtx.audioWorklet.addModule(blobUrl);
-    } catch (e) {
-      throw new Error('Could not load the audio listener (AudioWorklet). If you opened this file directly from disk, try serving it from a local server instead. Original error: ' + e.message);
-    } finally {
-      URL.revokeObjectURL(blobUrl); // free memory once loaded
-    }
-
-    captureNode = new AudioWorkletNode(nativeCtx, 'transient-processor', {
-      numberOfInputs: 1,
-      numberOfOutputs: 0,   // no audio output needed — analysis only
-      channelCount: 1,
-    });
-    captureNode.port.onmessage = onWorkletMessage;
-    hpFilter.connect(captureNode);
+    // 6. TRANSIENT DETECTION — polled via analyserNode in mainLoop
 
     // 7. MELODIC GRAIN OUTPUT — every "note" is a pitched playback of a real
     // recorded sound from sampleBank (see playGrainAtFreq). No oscillators,
@@ -833,10 +774,39 @@ registerProcessor('transient-processor', TransientProcessor);
     Tone.Transport.bpm.value = 86;
   }
 
-  // State used by the message handler (mirrors old onCaptureProcess locals)
   let rmsSmooth = 0.0;
   let gateOpen  = false;
 
+  function pollTransients() {
+    if (!analyserNode || !analyserBuf) return;
+    analyserNode.getFloatTimeDomainData(analyserBuf);
+    let sum = 0;
+    for (let i = 0; i < analyserBuf.length; i++) sum += analyserBuf[i] * analyserBuf[i];
+    const rms = Math.sqrt(sum / analyserBuf.length);
+    rmsSmooth = rmsSmooth * 0.88 + rms * 0.12;
+    orbitEnergy = orbitEnergy * 0.92 + rms * 0.08;
+    orbitHistory.copyWithin(0, 1);
+    orbitHistory[orbitHistory.length - 1] = Math.min(1, rms * 12);
+
+    const noiseGate = noiseFloorToRms(P.noiseFloor);
+    if (rms < noiseGate) return;
+
+    const thresh = 0.005 + (1 - P.transientThresh) * 0.08;
+    const isTransient = rms > rmsSmooth * 2.2 && rms > thresh && !gateOpen;
+    if (isTransient) {
+      const now = performance.now();
+      const state = getCurrentState();
+      const minGap = state === 'verse' ? 400 : state === 'chorus' ? 250 : 600;
+      if (now - lastTransientTime > minGap) {
+        lastTransientTime = now;
+        onTransientDetected(rms, new Float32Array(analyserBuf));
+        gateOpen = true;
+        setTimeout(() => gateOpen = false, minGap * 0.8);
+      }
+    }
+  }
+
+  // (legacy stub — no longer used)
   function onWorkletMessage({ data }) {
     if (!running) return;
     const { rms, samples } = data;
@@ -1225,6 +1195,7 @@ registerProcessor('transient-processor', TransientProcessor);
     const rmsDisplay = Math.min(100, orbitEnergy * 1200);
     $('input-energy').textContent = rmsDisplay > 1 ? Math.round(rmsDisplay) + '% RMS' : '–';
 
+    pollTransients();
     drawWaveform();
     drawOrbit(now, state);
     cleanupScoreRows(now);
@@ -1497,6 +1468,15 @@ registerProcessor('transient-processor', TransientProcessor);
     startIntroSequence();
     Tone.Transport.start();
     startMelodyEngine();
+    // If environment is very quiet, seed the bank after 5s so melody can start
+    setTimeout(() => {
+      if (sampleBank.length === 0 && analyserBuf) {
+        const sr = nativeCtx.sampleRate;
+        analyserNode.getFloatTimeDomainData(analyserBuf);
+        addToBank(new Float32Array(analyserBuf), sr, null);
+        log('SEEDED from ambient room tone — melody will begin');
+      }
+    }, 5000);
     rafId = requestAnimationFrame(mainLoop);
     log('FIELDWORK ACTIVE · listening to environment');
   }
