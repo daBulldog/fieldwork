@@ -702,7 +702,13 @@ registerProcessor('transient-processor', TransientProcessor);
 
   // ── BUILD GRAPH ────────────────────────────────────────────────
   async function buildGraph(stream) {
-    // Use Tone.js context
+    // If a previous session closed the AudioContext (see stop()), Tone.js
+    // would otherwise hand us back that dead context — and registering /
+    // constructing an AudioWorkletNode on a closed context is exactly what
+    // throws "Failed to construct 'AudioWorkletNode'". Give it a fresh one.
+    if (Tone.getContext().rawContext.state === 'closed') {
+      Tone.setContext(new Tone.Context());
+    }
     await Tone.start();
     nativeCtx = Tone.getContext().rawContext;
 
@@ -758,10 +764,18 @@ registerProcessor('transient-processor', TransientProcessor);
 
     // 6. TRANSIENT CAPTURE NODE (AudioWorklet — replaces deprecated ScriptProcessor)
     // Register the processor from a Blob URL so we stay single-file.
+    if (!nativeCtx.audioWorklet) {
+      throw new Error('This browser doesn\'t support AudioWorklet (needed to listen for sounds). Try a recent Chrome, Edge, or Firefox — or Safari 14.1+.');
+    }
     const blob = new Blob([WORKLET_CODE], { type: 'application/javascript' });
     const blobUrl = URL.createObjectURL(blob);
-    await nativeCtx.audioWorklet.addModule(blobUrl);
-    URL.revokeObjectURL(blobUrl); // free memory once loaded
+    try {
+      await nativeCtx.audioWorklet.addModule(blobUrl);
+    } catch (e) {
+      throw new Error('Could not load the audio listener (AudioWorklet). If you opened this file directly from disk, try serving it from a local server instead. Original error: ' + e.message);
+    } finally {
+      URL.revokeObjectURL(blobUrl); // free memory once loaded
+    }
 
     captureNode = new AudioWorkletNode(nativeCtx, 'transient-processor', {
       numberOfInputs: 1,
