@@ -702,15 +702,17 @@ registerProcessor('transient-processor', TransientProcessor);
 
   // ── BUILD GRAPH ────────────────────────────────────────────────
   async function buildGraph(stream) {
-    // If a previous session closed the AudioContext (see stop()), Tone.js
-    // would otherwise hand us back that dead context — and registering /
-    // constructing an AudioWorkletNode on a closed context is exactly what
-    // throws "Failed to construct 'AudioWorkletNode'". Give it a fresh one.
-    if (Tone.getContext().rawContext.state === 'closed') {
-      Tone.setContext(new Tone.Context());
-    }
+    // Create a brand-new native AudioContext ourselves for every session and
+    // hand it to Tone.js (rather than asking Tone for one). Tone's own
+    // `rawContext` can come back as a wrapped/proxied object in some builds,
+    // which fails the strict BaseAudioContext check the browser does inside
+    // the AudioWorkletNode constructor. A context we created with `new
+    // AudioContext()` is guaranteed to pass that check, and is always fresh
+    // (sidesteps any closed context left over from a previous session too).
+    const AC = window.AudioContext || window.webkitAudioContext;
+    nativeCtx = new AC();
+    Tone.setContext(nativeCtx);
     await Tone.start();
-    nativeCtx = Tone.getContext().rawContext;
 
     micStream = stream;
     micSrc = nativeCtx.createMediaStreamSource(stream);
